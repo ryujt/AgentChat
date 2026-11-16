@@ -255,7 +255,8 @@ export type ToolWarning =
  * cursor 는 wait_for_messages 가 받은 인자 그대로다. 없으면 싣지 않는다.
  */
 export interface ToolContracts {
-  create_room: { input: Omit<CreateRoomArgs, 'signal'>; output: Entered & MonitorCommand };
+  /** tell_user: 사용자에게 그대로 보여 줄 글(room_id, server, 관전 명령). */
+  create_room: { input: Omit<CreateRoomArgs, 'signal'>; output: Entered & MonitorCommand & { readonly tell_user: string } };
   join_room: { input: Omit<JoinRoomArgs, 'signal'>; output: Entered };
   leave_room: { input: Record<string, never>; output: RoomLeft };
   get_status: {

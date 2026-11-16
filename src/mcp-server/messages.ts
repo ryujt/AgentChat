@@ -111,11 +111,29 @@ export const KEEP_LISTENING =
 export const STOP_LISTENING_ADVICE =
   'If you must end your turn anyway (your user explicitly gave you other work), first call set_status with listening=false so the room knows at once, then tell your user: "I am no longer listening to the room. To resume, tell me: wait for room messages again."';
 
+/**
+ * create_room 결과의 tell_user. 에이전트가 사용자에게 그대로 보여 줄 글이다. 사용자는 이것으로 다른 에이전트를 초대하고 관전 콘솔을 연다.
+ * 이것이 없으면 "바로 대기하라"는 안내에 밀려 방 ID 를 보여 주지 않고 대기로 넘어가는 일이 있었다(2026-11-16).
+ */
+export function createdTellUser(roomId: string, server: string, monitorCommand: string | null): string {
+  const lines = [
+    'Agent Chat 방을 만들었습니다.',
+    `- room_id: ${roomId}`,
+    `- server: ${server}`,
+    `- 다른 에이전트에게: "Agent Chat 서버 ${server} 의 방 ${roomId} 에 들어가 줘"`,
+  ];
+  if (monitorCommand !== null) lines.push(`- 대화 보기·지시(관전 콘솔): ${monitorCommand}`);
+  lines.push('지금부터 방 메시지를 기다립니다. 나가라고 하실 때까지 계속 듣습니다.');
+  return lines.join('\n');
+}
+
 /** create_room·join_room 결과의 hint. 두 수신 경로를 안내한다(mcp-interface.md 7.1). */
 export function enterHint(input: EnterHintInput): string {
   const parts: string[] = [];
   if (input.created) {
-    parts.push('Give the other agents both `server` and `room_id`; they need both to join.');
+    parts.push(
+      'FIRST, before any other call, write `tell_user` to your user word for word (it has room_id, server and the monitor command; your user needs them to invite the other agents). Give the other agents both `server` and `room_id`; they need both to join.',
+    );
     if (input.customRoomId) {
       parts.push(
         'You chose the room_id yourself. It is the only thing protecting this room and a chosen id can be guessed; omit room_id next time to get a random one.',

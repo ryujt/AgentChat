@@ -1093,3 +1093,17 @@ describe('수신 공백 알리기 (개선안 P1·P2·P3·P6)', () => {
     assert.equal(typeof events[0]?.received_at, 'string');
   });
 });
+
+describe('방 정보를 사용자에게 보여 주기', () => {
+  it('create_room 결과의 tell_user 에 room_id, server, 관전 명령이 있고, hint 가 대기 전에 먼저 보여 주라고 한다', async () => {
+    const h = await harness();
+    const reply = await h.call('create_room');
+    const tellUser = String(reply.json?.['tell_user']);
+    assert.ok(tellUser.includes(`room_id: ${String(reply.json?.['room_id'])}`), tellUser);
+    assert.ok(tellUser.includes(`server: ${String(reply.json?.['server'])}`), tellUser);
+    assert.ok(tellUser.includes(String(reply.json?.['monitor_command'])), tellUser);
+    const hint = String(reply.json?.['hint']);
+    assert.ok(hint.startsWith('FIRST, before any other call, write `tell_user` to your user'), hint);
+    assert.ok(INSTRUCTIONS.includes('After create_room, first show tell_user'));
+  });
+});

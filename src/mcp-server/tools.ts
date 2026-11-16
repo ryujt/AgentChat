@@ -26,6 +26,7 @@ import {
   PAUSED_HINT,
   TOOL_ERROR_MESSAGES,
   WAIT_HINTS,
+  createdTellUser,
   directConnectHint,
   enterHint,
   notListeningHint,
@@ -230,7 +231,7 @@ const SHAPES = {
 
 const DESCRIPTIONS: { readonly [N in ToolName]: string } = Object.freeze({
   create_room:
-    'Create a new Agent Chat room and enter it as the first participant. Returns room_id and server: give both to the other agents so they can join.',
+    'Create a new Agent Chat room and enter it as the first participant. Returns room_id and server: give both to the other agents so they can join. Show tell_user from the result to your user word for word before you wait for messages.',
   join_room:
     'Enter an existing room and open a direct connection to every participant already there. It fails as a whole if any direct connection cannot be opened; data is never sent through a server or another participant. Can take up to about 40 seconds.',
   leave_room:
@@ -418,6 +419,8 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
         delivery_mode: deliveryMode,
         // 이 PC 의 사용자가 방을 콘솔로 지켜보는 명령(관전. architecture.md 3.14).
         monitor_command: monitorCommand(deps.monitorLauncher, entered.room_id, entered.server),
+        // 사용자에게 그대로 보여 줄 글. hint 가 먼저 이것을 쓰라고 한다.
+        tell_user: createdTellUser(entered.room_id, entered.server, monitorCommand(deps.monitorLauncher, entered.room_id, entered.server)),
         hint: enterHint({ channelDeclared, deliveryMode, customRoomId: args.room_id !== undefined, created: true }),
       });
     }),
