@@ -1,0 +1,42 @@
+# Agent Chat 자체 호스팅 시그널링 서버의 systemd 유닛 예시.
+# 경로(/opt/agent-chat, /usr/bin/node)와 사용자 이름은 환경에 맞게 고친다.
+# 이 파일은 예시다. systemd 아래에서 실행해 확인하지 않았다(deployments/self-host/README.md 7절).
+#
+#   sudo useradd --system --home /opt/agent-chat --shell /usr/sbin/nologin agent-chat
+#   sudo cp agent-chat-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agent-chat-server
+#   journalctl -u agent-chat-server -f
+
+[Unit]
+Description=Agent Chat signaling server (self-hosted)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 전용 사용자로 돌린다. 서버는 파일을 쓰지 않는다(--log-dir 를 줄 때만 그 디렉터리에 쓴다).
+User=agent-chat
+Group=agent-chat
+WorkingDirectory=/opt/agent-chat
+# 프록시 뒤에서는 127.0.0.1 에 바인드하고 --trust-proxy 를 켠다. 직접 받으면 --host 0.0.0.0 으로 바꾸고 --trust-proxy 를 뺀다.
+ExecStart=/usr/bin/node /opt/agent-chat/dist/entry/server.js --host 127.0.0.1 --port 8787 --trust-proxy
+# 상태가 메모리에 있으므로 인스턴스는 하나만 돌린다. 재시작하면 등록이 사라지고 클라이언트가 다시 등록한다.
+Restart=on-failure
+RestartSec=2
+# --max-connections(기본 2000)보다 넉넉하게 둔다.
+LimitNOFILE=8192
+# SIGTERM 을 받으면 열린 연결을 닫고 5초 안에 끝난다.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# 로그는 stdout 의 JSON 줄이다. journald 의 보존을 7일로 맞춘다(journald.conf 의 MaxRetentionSec=7day).
+StandardOutput=journal
+StandardError=journal
+# 권한 줄이기.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

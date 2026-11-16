@@ -1,0 +1,272 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  agent-chat 공용 시그널링 서버. API Gateway WebSocket API + Lambda + DynamoDB.
+  연결 주선만 한다. 데이터 중계와 EC2 는 없다(docs/design/deployment.md 2절).
+
+# 계정 ID, 호스팅 영역 ID, 인증서 ARN 은 이 파일에 적지 않는다. deploy.sh 가 인자로 받아 넘긴다.
+# 함수 코드는 deploy.sh 가 `aws lambda update-function-code` 로 올린다. 아래 ZipFile 은 자리만 잡는 임시 코드다.
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: 사용자 지정 도메인. 접속 주소는 wss://<이 값> 이다(매핑 키 없음).
+  CertificateArn:
+    Type: String
+    Description: 같은 리전의 ACM 인증서(ISSUED). 이 스택이 소유하지 않는다.
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: 도메인의 A 별칭 레코드를 둘 Route 53 호스팅 영역.
+  StageName:
+    Type: String
+    Default: prod
+    AllowedPattern: '^[A-Za-z0-9_-]{1,128}$'
+  ThrottleRate:
+    Type: Number
+    Default: 25
+    Description: 스테이지 기본 라우트의 초당 요청 수. 엄격한 상한이 아니다(deployment.md 2.7).
+  ThrottleBurst:
+    Type: Number
+    Default: 100
+  ReservedConcurrency:
+    Type: Number
+    Default: -1
+    Description: Lambda 예약 동시 실행. -1 이면 설정하지 않는다. 걸려면 ThrottleBurst 이상으로 준다.
+  AccessLog:
+    Type: String
+    Default: 'on'
+    AllowedValues: ['on', 'off']
+  AlarmTopicArn:
+    Type: String
+    Default: ''
+    Description: 주면 시간당 메시지 수 경보를 만들어 이 SNS 주제로 알린다.
+  AlarmMessagesPerHour:
+    Type: Number
+    Default: 50000
+  LogLevel:
+    Type: String
+    Default: info
+    AllowedValues: [debug, info, warn, error]
+
+Conditions:
+  HasReservedConcurrency: !Not [!Equals [!Ref ReservedConcurrency, -1]]
+  AccessLogOn: !Equals [!Ref AccessLog, 'on']
+  HasAlarm: !Not [!Equals [!Ref AlarmTopicArn, '']]
+
+Resources:
+  # 참가자 항목(ROOM#/PEER#)과 연결 항목(CONN#/CONN). 방 항목과 보조 인덱스는 없다(deployment.md 2.4).
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-table'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      # 판정에는 쓰지 않는다. 남은 항목을 치우는 용도다.
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+
+  FunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/agent-chat/${AWS::StackName}/function'
+      RetentionInDays: 7
+
+  AccessLogs:
+    Type: AWS::Logs::LogGroup
+    Condition: AccessLogOn
+    Properties:
+      LogGroupName: !Sub '/agent-chat/${AWS::StackName}/access'
+      RetentionInDays: 7
+
+  # 최소 권한(deployment.md 2.6): 자기 로그 그룹, 이 테이블의 다섯 연산, 이 API·스테이지의 연결 관리.
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: agent-chat-signaling
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt FunctionLogs.Arn
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query]
+                Resource: !GetAtt Table.Arn
+              - Effect: Allow
+                Action: execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/${StageName}/*/@connections/*'
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-fn'
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 10
+      Handler: index.handler
+      Role: !GetAtt FunctionRole.Arn
+      ReservedConcurrentExecutions: !If [HasReservedConcurrency, !Ref ReservedConcurrency, !Ref AWS::NoValue]
+      LoggingConfig:
+        LogGroup: !Ref FunctionLogs
+        LogFormat: Text
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref Table
+          LOG_LEVEL: !Ref LogLevel
+      Code:
+        # 인라인 코드는 index.js(CommonJS)로 저장된다. import 문을 쓰면 Runtime.UserCodeSyntaxError 다.
+        # 코드를 올리기 전의 몇 초 동안 들어온 접속은 500 으로 거절된다.
+        ZipFile: |
+          exports.handler = async () => ({ statusCode: 500 });
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-ws'
+      ProtocolType: WEBSOCKET
+      # action 별 라우트는 만들지 않는다. 모든 메시지가 $default 로 가고 분기와 검증은 core 한 곳에서 한다.
+      RouteSelectionExpression: $request.body.action
+
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Function.Arn}/invocations'
+
+  # 라우트 응답(RouteResponseSelectionExpression, RouteResponse)은 두지 않는다.
+  # 켜 두면 메시지마다 빈 프레임이 보낸 쪽에 간다. 응답은 연결 관리 API 로만 보낸다.
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${Integration}'
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: $disconnect
+      Target: !Sub 'integrations/${Integration}'
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: $default
+      Target: !Sub 'integrations/${Integration}'
+
+  # API 배포는 이 템플릿이 소유한다. 라우트나 통합을 바꾸면 이 자원의 논리 이름(V1)을 올려 새 배포를 만든다.
+  DeploymentV1:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [ConnectRoute, DisconnectRoute, DefaultRoute]
+    Properties:
+      ApiId: !Ref Api
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref Api
+      StageName: !Ref StageName
+      DeploymentId: !Ref DeploymentV1
+      DefaultRouteSettings:
+        ThrottlingRateLimit: !Ref ThrottleRate
+        ThrottlingBurstLimit: !Ref ThrottleBurst
+        # 실행 로그와 데이터 추적은 끈다. 켜면 본문이 로그에 들어갈 수 있다.
+        LoggingLevel: 'OFF'
+        DataTraceEnabled: false
+      # 본문, 연결 ID, IP 를 넣지 않는다. 형식에 $context.requestId 가 없으면 스테이지 생성이 실패한다.
+      AccessLogSettings: !If
+        - AccessLogOn
+        - DestinationArn: !GetAtt AccessLogs.Arn
+          Format: '{"requestId":"$context.requestId","eventType":"$context.eventType","routeKey":"$context.routeKey","status":"$context.status","error":"$context.error.message","integrationStatus":"$context.integrationStatus","requestTimeEpoch":"$context.requestTimeEpoch"}'
+        - !Ref AWS::NoValue
+
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*'
+
+  CustomDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - EndpointType: REGIONAL
+          CertificateArn: !Ref CertificateArn
+          SecurityPolicy: TLS_1_2
+
+  # 매핑 키가 없어 접속 주소에 경로가 붙지 않는다.
+  DomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      DomainName: !Ref CustomDomain
+      ApiId: !Ref Api
+      Stage: !Ref Stage
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CustomDomain.RegionalDomainName
+        HostedZoneId: !GetAtt CustomDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+
+  # 스로틀은 지출을 멈추지 않는다. 주제를 주면 시간당 메시지 수가 넘을 때 알린다.
+  MessageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarm
+    Properties:
+      AlarmDescription: agent-chat 공용 서버의 시간당 WebSocket 메시지 수
+      Namespace: AWS/ApiGateway
+      MetricName: MessageCount
+      Dimensions:
+        - { Name: ApiId, Value: !Ref Api }
+        - { Name: Stage, Value: !Ref Stage }
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: !Ref AlarmMessagesPerHour
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+Outputs:
+  Url:
+    Description: 클라이언트 접속 주소
+    Value: !Sub 'wss://${DomainName}'
+  ApiEndpoint:
+    Description: 기본 엔드포인트(진단용)
+    Value: !Sub 'wss://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+  ApiId:
+    Value: !Ref Api
+  StageName:
+    Value: !Ref Stage
+  TableName:
+    Value: !Ref Table
+  FunctionName:
+    Value: !Ref Function
+  FunctionLogGroup:
+    Value: !Ref FunctionLogs
+  AccessLogGroup:
+    Condition: AccessLogOn
+    Value: !Ref AccessLogs
