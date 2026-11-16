@@ -1,4 +1,4 @@
-// MCP 표면: 초기화 응답, tool 14개, 입력 상한, 결과 형식, notice, 채널 알림 (mcp-interface.md 1~7절).
+// MCP 표면: 초기화 응답, tool 15개, 입력 상한, 결과 형식, notice, 채널 알림 (mcp-interface.md 1~7절).
 // 제품의 MCP 서버를 SDK 클라이언트에 메모리 전송으로 붙여 본다. 세션은 가짜, 수신함은 실물이다. 증거 수준은 대역이다.
 
 import assert from 'node:assert/strict';
@@ -13,11 +13,15 @@ import { chatEvent, numberedChat, testStoppedEvent } from '../inbox/testing.js';
 import { CHANNEL_CHECK_FILE_NAME, parseChannelCheck } from '../protocol/index.js';
 import type { DirectConnectFailedDetails, SessionFailure } from '../room-session/contract.js';
 import { INSTRUCTIONS } from './instructions.js';
-import { DIRECT_CONNECT_HINTS, TOOL_ERROR_MESSAGES } from './messages.js';
+import { DIRECT_CONNECT_HINTS, KEEP_LISTENING, TOOL_ERROR_MESSAGES } from './messages.js';
 import { createMcpApp } from './server.js';
+import { monitorCommand } from './monitor-command.js';
 import { SAMPLE_ROOM_ID, SAMPLE_SERVER, connectHarness, createTestBed, fail, flush, sampleStatus } from './testing.js';
 import type { Harness, ToolReply } from './testing.js';
 import { TOOL_NAMES } from './tools.js';
+
+/** testing.ts 의 SAMPLE_MONITOR_LAUNCHER(공백과 작은따옴표가 든 경로)로 만든 관전 명령. */
+const SAMPLE_MONITOR_COMMAND = `sh '/opt/agent chat/it'\\''s/scripts/monitor.sh' ${SAMPLE_ROOM_ID} ${SAMPLE_SERVER}`;
 
 const ALL_TOOLS = [
   'create_room',
@@ -26,6 +30,7 @@ const ALL_TOOLS = [
   'get_status',
   'set_status',
   'send_message',
+  'ping_room',
   'wait_for_messages',
   'confirm_channel',
   'start_test',
@@ -136,7 +141,7 @@ describe('MCP 초기화 응답', () => {
 });
 
 describe('tool 목록', () => {
-  it('tool 14개를 설계의 이름 그대로 등록한다', async () => {
+  it('tool 15개를 설계의 이름 그대로 등록한다', async () => {
     const h = await harness();
     const { tools } = await h.client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [...ALL_TOOLS].sort());
@@ -147,7 +152,7 @@ describe('tool 목록', () => {
   it('AGENT_CHAT_CHANNEL=off 면 confirm_channel 을 등록하지 않는다', async () => {
     const h = await harness({ env: { AGENT_CHAT_CHANNEL: 'off' } });
     const { tools } = await h.client.listTools();
-    assert.equal(tools.length, 13);
+    assert.equal(tools.length, 14);
     assert.equal(tools.some((tool) => tool.name === 'confirm_channel'), false);
     const reply = await h.call('confirm_channel', { token: 'abcdefgh12345678' });
     assert.equal(reply.isError, true);
@@ -349,6 +354,42 @@ describe('tool 과 room-session 의 연결', () => {
     assert.deepEqual(joined.json?.['you'], { role: null, tools: [], status: 'joined', note: null, rejoined: false });
   });
 
+  it('(관전) create_room 은 monitor_command 와 빈 observers 를, join_room 은 observers 를 싣는다', async () => {
+    const h = await harness();
+    const created = await h.call('create_room');
+    assert.equal(created.json?.['monitor_command'], SAMPLE_MONITOR_COMMAND);
+    assert.deepEqual(created.json?.['observers'], []);
+    await h.call('leave_room');
+    const observer = { name: 'observer-4k2q', link: 'open', since: '2026-11-16T05:01:02.000Z' } as const;
+    const entered = await h.session.join({ room_id: SAMPLE_ROOM_ID });
+    assert.ok(entered.ok);
+    h.session.responses.join = { ...entered, observers: [observer] };
+    await h.call('leave_room');
+    const joined = await h.call('join_room', { room_id: SAMPLE_ROOM_ID });
+    assert.deepEqual(joined.json?.['observers'], [observer]);
+    assert.equal('monitor_command' in (joined.json ?? {}), false, 'join_room 에는 싣지 않는다(get_status 에 있다)');
+  });
+
+  it('(관전) get_status 는 세션의 observers 를 그대로 싣고 room.monitor_command 를 더한다', async () => {
+    const h = await inRoom();
+    const observers = [{ name: 'observer-4k2q', link: 'open', since: '2026-11-16T05:01:02.000Z' } as const];
+    h.session.responses.status = { ok: true, ...sampleStatus(), observers };
+    const reply = await h.call('get_status');
+    assert.deepEqual(reply.json?.['observers'], observers);
+    const room = reply.json?.['room'] as Record<string, unknown>;
+    assert.equal(room['monitor_command'], SAMPLE_MONITOR_COMMAND);
+    // 관전은 mcp-server 의 일이 아니다. 세션의 관전 진입점을 부르지 않는다.
+    assert.equal(h.session.calls.some((call) => call.method === 'observe' || call.method === 'observed'), false);
+  });
+
+  it('(관전) 진입점을 모르면 monitor_command 는 null 이다', async () => {
+    const h = await harness({ monitorLauncher: null });
+    const created = await h.call('create_room');
+    assert.equal(created.json?.['monitor_command'], null);
+    const status = await h.call('get_status');
+    assert.equal((status.json?.['room'] as Record<string, unknown>)['monitor_command'], null);
+  });
+
   it('AGENT_CHAT_CHANNEL=off 면 안내에 채널을 싣지 않고 점검도 하지 않는다', async () => {
     const h = await harness({ env: { AGENT_CHAT_CHANNEL: 'off' } });
     const reply = await h.call('create_room');
@@ -362,7 +403,9 @@ describe('tool 과 room-session 의 연결', () => {
     h.inbox.push(numberedChat(1));
     h.inbox.push(numberedChat(2));
     const reply = await h.call('leave_room');
-    assert.deepEqual(reply.json, { ok: true, left: true, transcript_path: '/home/agent-chat/rooms/transcript.jsonl', undelivered_events: 2 });
+    assert.deepEqual(reply.json?.['undelivered_events'], 2);
+    // 나가기 전의 호출이라 밀린 양이 notice 에 붙는다(개선안 P2).
+    assert.equal((reply.json?.['notice'] as { unread?: { count: number } } | undefined)?.unread?.count, 2);
   });
 
   it('get_status 는 세션의 상태에 전달 모드와 경고(수신함 누락, 무시한 설정)를 더한다', async () => {
@@ -370,9 +413,9 @@ describe('tool 과 room-session 의 연결', () => {
     h.session.responses.status = { ok: true, ...sampleStatus(), warnings: [{ code: 'unreachable', peer: 'codex-9z' }] };
     for (let i = 1; i <= DEFAULT_INBOX_LIMITS.INBOX_MAX_EVENTS + 1; i += 1) h.inbox.push(numberedChat(i));
     const reply = await h.call('get_status');
-    assert.deepEqual(Object.keys(reply.json ?? {}), ['ok', 'room', 'delivery_mode', 'participants', 'test', 'claims', 'warnings', 'notice']);
+    assert.deepEqual(Object.keys(reply.json ?? {}), ['ok', 'room', 'delivery_mode', 'participants', 'observers', 'test', 'claims', 'warnings', 'notice']);
     assert.equal(reply.json?.['delivery_mode'], 'poll');
-    assert.deepEqual(reply.json?.['room'], sampleStatus().room);
+    assert.deepEqual(reply.json?.['room'], { ...sampleStatus().room, monitor_command: SAMPLE_MONITOR_COMMAND });
     assert.deepEqual(reply.json?.['warnings'], [
       { code: 'unreachable', peer: 'codex-9z' },
       { code: 'inbox_dropped', count: 2 },
@@ -953,5 +996,100 @@ describe('notice', () => {
       ['stop_test', 'error', 'NO_ACTIVE_TEST'],
     ]);
     assert.equal(JSON.stringify(h.log.events).includes('zq-secret-marker'), false);
+  });
+});
+
+describe('(관전) monitorCommand: 사람이 콘솔에 붙여 넣는 명령 한 줄 (mcp-interface.md 3.4)', () => {
+  it('sh: 경로를 작은따옴표로 감싸고 안의 작은따옴표를 바꾼다. 방 ID 와 서버 키를 그대로 잇는다', () => {
+    assert.equal(
+      monitorCommand({ kind: 'sh', path: '/Users/me/.agent-chat/app/scripts/monitor.sh' }, 'k3x9q0ab12cdx7p2', 'wss://agent-chat.tools.camp'),
+      "sh '/Users/me/.agent-chat/app/scripts/monitor.sh' k3x9q0ab12cdx7p2 wss://agent-chat.tools.camp",
+    );
+    assert.equal(monitorCommand({ kind: 'sh', path: "/a b/c'd/monitor.sh" }, 'room0001', 'ws://127.0.0.1:8787'), "sh '/a b/c'\\''d/monitor.sh' room0001 ws://127.0.0.1:8787");
+  });
+
+  it('sh: 셸이 해석할 글자가 든 서버 키는 인용한다', () => {
+    assert.equal(monitorCommand({ kind: 'sh', path: '/x/monitor.sh' }, 'room0001', 'wss://h.example/a b'), "sh '/x/monitor.sh' room0001 'wss://h.example/a b'");
+    assert.equal(monitorCommand({ kind: 'sh', path: '/x/monitor.sh' }, 'room0001', 'wss://h.example/$(x)'), "sh '/x/monitor.sh' room0001 'wss://h.example/$(x)'");
+  });
+
+  it('node(Windows): 큰따옴표로 감싼 조립 파일 경로', () => {
+    assert.equal(
+      monitorCommand({ kind: 'node', path: 'C:\\Users\\me\\agent chat\\dist\\entry\\monitor.js' }, 'room0001', 'wss://agent-chat.tools.camp'),
+      'node "C:\\Users\\me\\agent chat\\dist\\entry\\monitor.js" room0001 wss://agent-chat.tools.camp',
+    );
+  });
+
+  it('진입점이 없으면 null', () => {
+    assert.equal(monitorCommand(null, 'room0001', 'wss://agent-chat.tools.camp'), null);
+    assert.equal(monitorCommand(undefined, 'room0001', 'wss://agent-chat.tools.camp'), null);
+  });
+
+  it('안내문은 관전자를 기다리거나 일을 맡기지 말고 monitor_command 를 알려 주라고 한다', () => {
+    assert.ok(INSTRUCTIONS.includes('Observers (get_status.observers'));
+    assert.ok(INSTRUCTIONS.includes('Do not wait for them or assign them work'));
+    assert.ok(INSTRUCTIONS.includes('monitor_command'));
+  });
+});
+
+describe('수신 공백 알리기 (개선안 P1·P2·P3·P6)', () => {
+  it('poll 모드의 입장 결과와 timeout 결과의 hint 는 턴을 끝내지 말고 이어 기다리라고 한다', async () => {
+    const h = await harness({ env: { AGENT_CHAT_CHANNEL: 'off' } });
+    const entered = await h.call('create_room', {});
+    assert.ok(String(entered.json?.['hint']).includes(KEEP_LISTENING));
+    const waited = await h.call('wait_for_messages', { timeout_sec: 0 });
+    assert.equal(waited.json?.['status'], 'timeout');
+    assert.ok(String(waited.json?.['hint']).includes(KEEP_LISTENING));
+    assert.ok(INSTRUCTIONS.includes('keep working with the others on your user\'s request until your user explicitly tells you to leave the room'));
+  });
+
+  it('send_message 결과에 not_listening 이 있으면 hint 를 붙인다', async () => {
+    const h = await inRoom();
+    h.session.responses.sendChat = {
+      ok: true,
+      message_id: 'k3x9q0ab12cd-9',
+      delivered: ['codex-7f3k'],
+      undelivered: [],
+      not_listening: [{ name: 'codex-7f3k', since: '2026-11-16T01:44:00.000Z' }],
+    };
+    const reply = await h.call('send_message', { text: 'hi' });
+    assert.deepEqual(reply.json?.['not_listening'], [{ name: 'codex-7f3k', since: '2026-11-16T01:44:00.000Z' }]);
+    assert.ok(String(reply.json?.['hint']).includes('codex-7f3k is not listening now'));
+  });
+
+  it('set_status{listening: false} 는 수신함을 멈추고 넘긴 뒤 사용자에게 할 말을 hint 로 준다', async () => {
+    const h = await inRoom();
+    await h.call('wait_for_messages', { timeout_sec: 0 });
+    assert.equal(h.inbox.listening(), true);
+    const reply = await h.call('set_status', { listening: false });
+    assert.equal(h.inbox.paused(), true);
+    assert.deepEqual(h.session.calls.at(-1), { method: 'command', args: { type: 'set_status', listening: false } });
+    assert.ok(String(reply.json?.['hint']).includes('no longer listening'));
+    const invalid = await h.call('set_status', { listening: true });
+    assert.equal(invalid.isError, true, 'true 는 받지 않는다. 다시 들으려면 wait_for_messages 를 부른다');
+  });
+
+  it('ping_room 은 기본 15초를 넘기고 결과에 hint 를 붙인다. 범위 밖은 거절한다', async () => {
+    const h = await inRoom();
+    const reply = await h.call('ping_room', {});
+    assert.deepEqual(h.session.calls.at(-1), { method: 'ping', args: { timeoutMs: 15_000 } });
+    assert.equal(reply.json?.['message_id'], 'k3x9q0ab12cd-10');
+    assert.ok(String(reply.json?.['hint']).includes('needs no reply'));
+    await h.call('ping_room', { timeout_sec: 3 });
+    assert.deepEqual(h.session.calls.at(-1), { method: 'ping', args: { timeoutMs: 3000 } });
+    assert.equal((await h.call('ping_room', { timeout_sec: 61 })).isError, true);
+  });
+
+  it('다른 tool 결과의 notice.unread 에 읽지 않은 사건 수와 밀린 시간을 싣는다', async () => {
+    const h = await inRoom();
+    h.inbox.push(numberedChat(1));
+    h.inbox.push(numberedChat(2));
+    const reply = await h.call('get_status');
+    const unread = (reply.json?.['notice'] as { unread?: { count: number; oldest_age_sec: number } } | undefined)?.unread;
+    assert.equal(unread?.count, 2);
+    const waited = await h.call('wait_for_messages', { timeout_sec: 0 });
+    assert.equal((waited.json?.['notice'] as { unread?: unknown } | undefined)?.unread, undefined);
+    const events = waited.json?.['events'] as { received_at?: string }[];
+    assert.equal(typeof events[0]?.received_at, 'string');
   });
 });

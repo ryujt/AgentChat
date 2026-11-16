@@ -10,7 +10,7 @@
 //   room        node tests/e2e/room/v-l12.mjs                      V-L12 (방 조율 하네스. 3분 남짓)
 //   mcp         node --test tests/e2e/mcp/*.test.mjs               V-L7(가) (가짜 세션)
 //   install     node --test tests/e2e/install/                     V-L10(가) (가짜 호스트 CLI)
-//   scenarios   tests/e2e/scenarios 의 v-l2 … v-l8, a-rtc 를 차례로   V-L2~V-L8, V-L7(나), A-RTC-4·6 (조립한 MCP 진입점)
+//   scenarios   tests/e2e/scenarios 의 v-l2 … v-l8, v-l13, a-rtc 를 차례로   V-L2~V-L8, V-L7(나), V-L13(관전), A-RTC-4·6 (조립한 MCP 진입점)
 //   scenarios/<이름>   그 시나리오 하나(예: scenarios/v-l3). 장시간 시험 v-l9 는 이렇게 이름으로만 돈다
 //
 //   묶음을 주지 않으면 wire, mesh, room, mcp, install, scenarios 를 모두 돈다(scenarios/v-l9 는 빠진다).
@@ -37,7 +37,7 @@ const SCENARIO_DIR = path.join(HERE, 'scenarios');
 /** 기본 실행에서 빼는 시나리오(장시간). 이름으로 주면 돈다. */
 const LONG_SCENARIOS = new Set(['v-l9']);
 /** 기본 실행의 시나리오 순서. 폴더에 있는데 여기 없는 것은 뒤에 이름순으로 붙는다. */
-const SCENARIO_ORDER = ['v-l2', 'v-l3', 'v-l4', 'v-l5', 'v-l6', 'v-l7', 'v-l8', 'a-rtc'];
+const SCENARIO_ORDER = ['v-l2', 'v-l3', 'v-l4', 'v-l5', 'v-l6', 'v-l7', 'v-l8', 'v-l13', 'a-rtc'];
 const SAMPLE_MS = 500;
 const LEFTOVER_GRACE_MS = 3_000;
 

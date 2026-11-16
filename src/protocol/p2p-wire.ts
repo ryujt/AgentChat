@@ -32,6 +32,11 @@ export const helloFrameSchema = z.object({
   /** 시계 차이 경고에만 쓴다. */
   wall: wallSchema,
   client: z.object({ name: z.string().min(1), version: z.string().min(1) }),
+  /**
+   * 관전자 표시(protocol.md 4.6). 선택 필드라 v 는 그대로다. 새 구현은 늘 싣는다(참가자 false, 관전자 true).
+   * 없으면 관전자를 모르는 구버전이다. 구버전은 모르는 필드를 버리므로 그대로 받는다.
+   */
+  observer: z.boolean().optional(),
 });
 
 /** state 의 봉투만 본다. 기록은 하나씩 따로 검증해 나쁜 것만 버린다. */
@@ -68,9 +73,23 @@ export const chatFrameSchema = z.object({
   }),
   /** 표시용. 순서 판정에 쓰지 않는다. */
   wall: wallSchema,
+  /**
+   * 읽음 확인 요청(ping_room. protocol.md 4.3). 선택 필드라 v 는 그대로다. 받는 쪽 에이전트가 이 글을 꺼내 가면
+   * ack{read: true} 를 한 번 더 보낸다. 구버전은 모르는 필드를 버리고 보통 글로 받는다(읽음 확인이 오지 않는다).
+   */
+  rr: z.literal(true).optional(),
 });
 
-export const ackFrameSchema = z.object({ v: versionField, t: z.literal('ack'), id: entryIdSchema });
+export const ackFrameSchema = z.object({
+  v: versionField,
+  t: z.literal('ack'),
+  id: entryIdSchema,
+  /**
+   * 참이면 "수신함에 넣었다"가 아니라 "에이전트가 읽었다"는 확인이다(rr 을 단 글에만 보낸다). 선택 필드라 v 는 그대로다.
+   * 구버전은 이 필드를 버리고 이미 받은 ack 로 본다(아무 일도 없다).
+   */
+  read: z.literal(true).optional(),
+});
 
 export const pingFrameSchema = z.object({
   v: versionField,

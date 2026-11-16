@@ -1,5 +1,6 @@
 // 프로세스에 하나인 세션 (architecture.md 3.10). 한 번에 방 하나에만 있는다.
 // 여기서는 "방에 있는가"와 인자 검증만 본다. 방 안의 일은 입장마다 새로 만드는 room 이 한다.
+// observe 는 관전 모드로 들어간다(protocol.md 4.6). 입장 절차는 join 과 같고 쓰는 일만 하지 않는다.
 // 만들 때는 아무 데도 접속하지 않는다.
 
 import { checkPeerName, isRoomId, newResumeKey, newRoomId, newSid, normalizeServerAddress } from '../protocol/index.js';
@@ -9,7 +10,9 @@ import type {
   CreateRoomSession,
   DefaultRoomSessionLimits,
   JoinRoomArgs,
+  ObserveRoomArgs,
   RoomEntered,
+  RoomObserved,
   RoomSession,
   SessionCommand,
   SessionFailure,
@@ -47,9 +50,9 @@ export const createRoomSession: CreateRoomSession = (deps) => {
   const invalid = (detail: string): SessionFailure => ({ ok: false, code: 'INVALID_ARGUMENT', detail });
 
   const enter = async (
-    mode: 'create' | 'join',
-    args: CreateRoomArgs | JoinRoomArgs,
-  ): Promise<SessionResult<RoomEntered>> => {
+    mode: 'create' | 'join' | 'observe',
+    args: CreateRoomArgs | JoinRoomArgs | ObserveRoomArgs,
+  ): Promise<SessionResult<{ readonly room: Room; readonly entered: { readonly ok: true } & RoomEntered }>> => {
     if (stopping !== null) return CANCELLED;
     if (phase !== 'idle') return ALREADY_IN_ROOM;
     if (args.signal?.aborted === true) return CANCELLED;
@@ -73,13 +76,20 @@ export const createRoomSession: CreateRoomSession = (deps) => {
     if (!isRoomId(roomId)) return invalid('room_id must be 8-32 characters of lowercase letters and digits');
 
     phase = 'entering';
-    const roomKey = `${server.value.serverKey}\n${roomId}`;
-    const names = namesByRoom.get(roomKey) ?? new Set<string>();
-    names.add(name.value);
-    namesByRoom.set(roomKey, names);
+    // 관전자는 주장을 쓰거나 검증하지 않는다. 이 방에서 쓴 이름 목록에 넣지 않는다.
+    let names: Set<string>;
+    if (mode === 'observe') {
+      names = new Set([name.value]);
+    } else {
+      const roomKey = `${server.value.serverKey}\n${roomId}`;
+      names = namesByRoom.get(roomKey) ?? new Set<string>();
+      names.add(name.value);
+      namesByRoom.set(roomKey, names);
+    }
 
     const entered = createRoom(deps, {
-      mode,
+      mode: mode === 'observe' ? 'join' : mode,
+      role: mode === 'observe' ? 'observer' : 'participant',
       roomId,
       name: name.value,
       sid: newSid(deps.randomBytes),
@@ -94,7 +104,7 @@ export const createRoomSession: CreateRoomSession = (deps) => {
     const result = await entered.enter();
     if (result.ok && stopping === null) {
       phase = 'in';
-      return result;
+      return { ok: true, room: entered, entered: result };
     }
     if (room === entered) room = null;
     phase = 'idle';
@@ -102,11 +112,30 @@ export const createRoomSession: CreateRoomSession = (deps) => {
     return result.ok ? CANCELLED : result;
   };
 
+  const enterAs = async (mode: 'create' | 'join', args: CreateRoomArgs | JoinRoomArgs): Promise<SessionResult<RoomEntered>> => {
+    const result = await enter(mode, args);
+    return result.ok ? result.entered : result;
+  };
+
   const inRoom = (): Room | null => (phase === 'in' ? room : null);
 
   const session: RoomSession = {
-    create: (args) => enter('create', args),
-    join: (args) => enter('join', args),
+    create: (args) => enterAs('create', args),
+    join: (args) => enterAs('join', args),
+
+    async observe(args) {
+      const result = await enter('observe', args);
+      if (!result.ok) return result;
+      const observed: RoomObserved = result.room.observed();
+      return { ok: true, ...observed };
+    },
+
+    observed() {
+      if (stopping !== null) return CANCELLED;
+      const current = inRoom();
+      if (current === null) return NOT_IN_ROOM;
+      return { ok: true, ...current.observed() };
+    },
 
     async leave() {
       if (stopping !== null) return CANCELLED;
@@ -127,6 +156,14 @@ export const createRoomSession: CreateRoomSession = (deps) => {
       const current = inRoom();
       if (current === null) return NOT_IN_ROOM;
       const result = await current.sendChat(args);
+      return stopping !== null ? CANCELLED : result;
+    },
+
+    async ping(args) {
+      if (stopping !== null) return CANCELLED;
+      const current = inRoom();
+      if (current === null) return NOT_IN_ROOM;
+      const result = await current.ping(args);
       return stopping !== null ? CANCELLED : result;
     },
 

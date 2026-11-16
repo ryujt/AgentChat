@@ -86,7 +86,7 @@ function unknown(row: number, reason: string): ChannelsVerdict {
 
 /** 판정표를 위에서부터 보고 처음 맞는 행을 돌려준다. */
 export function judgeChannels(input: ChannelsInput): ChannelsVerdict {
-  if (input.host === 'codex') {
+  if (input.host !== 'claude') {
     return { result: 'impossible', row: null, reason: '채널이 없다', guidance: 'poll 로 받는다.' };
   }
   const { version, auth, managed, check } = input;

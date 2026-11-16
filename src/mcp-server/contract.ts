@@ -11,6 +11,7 @@ import type {
   CommandOutputs,
   CreateRoomArgs,
   JoinRoomArgs,
+  PingSent,
   ReportWritten,
   RoomEntered,
   RoomLeft,
@@ -98,6 +99,18 @@ export interface DefaultMcpServerLimits extends McpServerLimits {
   readonly SHUTDOWN_BUDGET_MS: 400;
 }
 
+/**
+ * 이 PC 에서 사람이 방을 콘솔로 지켜보는 진입점(architecture.md 3.14). 조립(entry/mcp)이 패키지 뿌리로 만든다.
+ * - sh: `scripts/monitor.sh` 를 sh 로 실행한다(POSIX).
+ * - node: `dist/entry/monitor.js` 를 node 로 실행한다(Windows. sh 가 없다).
+ * mcp-server 의 순수 함수 monitorCommand 가 이것으로 create_room 과 get_status 의 monitor_command 를 만든다.
+ */
+export interface MonitorLauncher {
+  readonly kind: 'sh' | 'node';
+  /** 실행할 파일의 절대 경로. */
+  readonly path: string;
+}
+
 export interface McpServerDeps {
   readonly session: RoomSession;
   readonly inbox: Inbox;
@@ -109,6 +122,13 @@ export interface McpServerDeps {
   readonly now: Now;
   readonly timers: Timers;
   readonly log: LogPort;
+  /** 관전 명령을 만드는 진입점. 생략하거나 null 이면 monitor_command 가 null 이다(시험). */
+  readonly monitorLauncher?: MonitorLauncher | null;
+  /**
+   * 수신 상태 파일(`<home>/listen/<pid>.json`)에 적을 이 프로세스와 부모의 번호. 선택형 Stop hook 이 읽는다.
+   * 생략하거나 null 이면 파일을 쓰지 않는다(시험).
+   */
+  readonly listenState?: { readonly pid: number; readonly ppid: number } | null;
 }
 
 export type ShutdownCause =
@@ -157,6 +177,8 @@ export interface ToolInputLimits {
   readonly TEST_DURATION_MIN: { readonly min: 1; readonly max: 480; readonly default: 60 };
   readonly TEST_SCENARIOS: { readonly min: 1; readonly max: 100; readonly default: 20 };
   readonly WAIT_MAX_SEC: { readonly min: 5; readonly max: 540; readonly default: 50 };
+  /** ping_room 이 읽음 확인을 기다리는 시간(초). */
+  readonly PING_TIMEOUT_SEC: { readonly min: 1; readonly max: 60; readonly default: 15 };
 }
 
 // ── tool 결과로 옮기는 표 ───────────────────────────────────────────────────
@@ -202,6 +224,9 @@ export interface ToolFailure {
 
 type Entered = RoomEntered & { readonly delivery_mode: DeliveryMode; readonly hint: string };
 
+/** 사람이 이 방을 콘솔에서 지켜보는 명령 한 줄(mcp-interface.md 3.4). 방 ID 가 들어 있다. 진입점을 모르면 null. */
+type MonitorCommand = { readonly monitor_command: string | null };
+
 type CommandInput<T extends SessionCommand['type']> = Omit<Extract<SessionCommand, { type: T }>, 'type'>;
 
 /** mcp-server 가 get_status 에 더하는 경고. */
@@ -230,18 +255,23 @@ export type ToolWarning =
  * cursor 는 wait_for_messages 가 받은 인자 그대로다. 없으면 싣지 않는다.
  */
 export interface ToolContracts {
-  create_room: { input: Omit<CreateRoomArgs, 'signal'>; output: Entered };
+  create_room: { input: Omit<CreateRoomArgs, 'signal'>; output: Entered & MonitorCommand };
   join_room: { input: Omit<JoinRoomArgs, 'signal'>; output: Entered };
   leave_room: { input: Record<string, never>; output: RoomLeft };
   get_status: {
     input: Record<string, never>;
-    output: Omit<SessionStatus, 'warnings'> & {
+    output: Omit<SessionStatus, 'warnings' | 'room'> & {
+      readonly room: SessionStatus['room'] & MonitorCommand;
       readonly delivery_mode: DeliveryMode;
       readonly warnings: readonly ToolWarning[];
     };
   };
-  set_status: { input: CommandInput<'set_status'>; output: CommandOutputs['set_status'] };
-  send_message: { input: SendChatArgs; output: ChatSent };
+  /** listening: false 면 결과에 hint(사용자에게 할 말)를 더한다. */
+  set_status: { input: CommandInput<'set_status'>; output: CommandOutputs['set_status'] & { readonly hint?: string } };
+  /** not_listening 이 있으면 hint 를 더한다. */
+  send_message: { input: SendChatArgs; output: ChatSent & { readonly hint?: string } };
+  /** 수신 점검(개선안 P6). 결과에 hint 를 늘 싣는다. */
+  ping_room: { input: { readonly timeout_sec?: number }; output: PingSent & { readonly hint: string } };
   wait_for_messages: {
     input: { readonly timeout_sec?: number; readonly cursor?: string };
     output: {

@@ -66,6 +66,17 @@ describe('parseP2PFrame: 타입별 통과 표본', () => {
     });
   });
 
+  it('hello.observer: 없어도(구버전), true·false 여도 받는다. 불리언이 아니면 BAD_FRAME (V-U12)', () => {
+    const base = { v: 1, t: 'hello', peer: 'observer-4k2q', sid: SID, wall: 1, client: { name: 'agent-chat', version: '0.1.0' } };
+    expectFrame(base);
+    expectFrame({ ...base, observer: true });
+    expectFrame({ ...base, observer: false });
+    for (const bad of ['true', 1, 0, null, {}, []]) expectCode({ ...base, observer: bad }, 'BAD_FRAME');
+    const encoded = encodeP2PFrame({ ...base, observer: true } as P2PFrame);
+    assert.equal(encoded.ok, true);
+    assert.equal(encoded.ok ? (JSON.parse(encoded.value) as { observer?: unknown }).observer : null, true);
+  });
+
   it('chat: 방 전체(to=null)와 대상 지정', () => {
     expectFrame({ v: 1, t: 'chat', id: `${SID}-1a`, to: null, text: '강사 화면에서 손들기 표시가 보입니다', wall: 1 });
     expectFrame({ v: 1, t: 'chat', id: `${SID}-1b`, to: ['codex-7f3k', 'gemini-1'], text: '', wall: 0 });

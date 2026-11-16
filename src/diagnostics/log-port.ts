@@ -6,7 +6,8 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 /** 줄마다 붙는 svc 값. 로거를 만들 때 정한다. 호출 지점은 넘기지 않는다. */
-export type LogService = 'mcp' | 'server' | 'lambda' | 'cli';
+/** monitor 는 관전 도구(architecture.md 3.14)다. mcp·cli 처럼 peer 를 남긴다. */
+export type LogService = 'mcp' | 'server' | 'lambda' | 'cli' | 'monitor';
 
 /** 줄마다 붙는 mod 값. 사건을 낸 모듈의 폴더 이름이다. */
 export type LogModule =
@@ -23,6 +24,7 @@ export type LogModule =
   | 'room-session'
   | 'mcp-server'
   | 'setup'
+  | 'monitor'
   | 'entry';
 
 /**
@@ -120,7 +122,13 @@ export type LogFieldName =
   | 'rss_mb'
   // 설치
   | 'step'
-  | 'host';
+  | 'host'
+  // 관전(monitor.end). 출력한 사건 수와 싱크가 넘쳐 버린 사건 수. dropped 는 로거만 붙이는 필드라 따로 둔다
+  | 'events'
+  | 'events_dropped'
+  // 수신 점검(chat.ping). 읽음 확인을 받은 수와 듣지 않는 수신자 수
+  | 'read'
+  | 'not_listening';
 
 type LogScalar = string | number | boolean | null;
 

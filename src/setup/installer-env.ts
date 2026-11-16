@@ -3,6 +3,7 @@
 // 예외는 AGENT_CHAT_HOME 이다. 기본값(~/.agent-chat)이 아니면 등록에도 넣는다(registration.ts). MCP 프로세스가 같은 곳에 쓰게 하려는 것이다.
 
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { geminiSettingsPaths, type GeminiSettingsPaths } from './gemini-config.js';
 import type { HostKind } from './types.js';
 
 export type EnvMap = Readonly<Record<string, string | undefined>>;
@@ -26,6 +27,8 @@ export interface InstallerEnv {
   readonly providerFlags: readonly string[];
   /** Codex 설정 파일. Codex 가 `CODEX_HOME` 을 따르므로 같은 규칙으로 찾는다. */
   readonly codexConfigPath: string;
+  /** Gemini CLI 설정 파일(사용자 `~/.gemini/settings.json`, 작업 폴더의 `.gemini/settings.json`). 등록을 여기서 읽는다. */
+  readonly geminiSettings: GeminiSettingsPaths;
   /**
    * 설치를 실행한 작업 폴더. 호스트 CLI 는 이 폴더에서 실행되고 그 폴더의 등록(Claude Code 의 local·project 범위, Codex 의 프로젝트 설정)을 함께 본다.
    * Codex 의 프로젝트 설정에 같은 이름의 등록이 있는지 찾을 때 쓴다(검토 3차 BOUNDARY-R3-02).
@@ -48,6 +51,7 @@ export function readInstallerEnv(env: EnvMap, userHome: string, cwd: string): In
   const home = given(env, 'AGENT_CHAT_HOME');
   const claude = given(env, 'AGENT_CHAT_CLAUDE_BIN');
   const codex = given(env, 'AGENT_CHAT_CODEX_BIN');
+  const gemini = given(env, 'AGENT_CHAT_GEMINI_BIN');
   const codexHome = given(env, 'CODEX_HOME');
   const defaultHome = join(userHome, '.agent-chat');
   const resolvedHome = home === null ? defaultHome : absolute(home, cwd);
@@ -57,10 +61,12 @@ export function readInstallerEnv(env: EnvMap, userHome: string, cwd: string): In
     bins: {
       claude: { value: claude ?? 'claude', explicit: claude !== null },
       codex: { value: codex ?? 'codex', explicit: codex !== null },
+      gemini: { value: gemini ?? 'gemini', explicit: gemini !== null },
     },
     server: given(env, 'AGENT_CHAT_SERVER'),
     providerFlags: PROVIDER_FLAGS.filter((name) => given(env, name) !== null),
     codexConfigPath: join(codexHome === null ? join(userHome, '.codex') : absolute(codexHome, cwd), 'config.toml'),
+    geminiSettings: geminiSettingsPaths(userHome, cwd),
     cwd,
   };
 }

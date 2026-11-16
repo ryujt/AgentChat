@@ -1,4 +1,4 @@
-// tool 14개의 입력 스키마와 등록 (mcp-interface.md 2~3절). 구현 뒤에는 이 파일의 스키마가 원본이다.
+// tool 15개의 입력 스키마와 등록 (mcp-interface.md 2~3절). 구현 뒤에는 이 파일의 스키마가 원본이다.
 // 방 로직은 없다. 입력의 상한을 걸고, room-session 과 inbox 를 불러, 결과를 JSON 한 덩어리로 옮긴다.
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -9,14 +9,27 @@ import type { Inbox, InboxNotice } from '../inbox/contract.js';
 import { CLAIM_OUTCOMES, LIMITS, VERIFICATION_RESULTS, utf8ByteLength } from '../protocol/index.js';
 import type { Now } from '../protocol/index.js';
 import type { RoomSession, SessionFailure, SessionResult } from '../room-session/contract.js';
-import type { ConfigProblem, McpConfig, ToolContracts, ToolErrorCode, ToolName, ToolNotice, ToolWarning } from './contract.js';
+import type {
+  ConfigProblem,
+  McpConfig,
+  MonitorLauncher,
+  ToolContracts,
+  ToolErrorCode,
+  ToolName,
+  ToolNotice,
+  ToolWarning,
+} from './contract.js';
 import { TOOL_INPUT_LIMITS } from './limits.js';
+import { monitorCommand } from './monitor-command.js';
 import {
   CONFIRM_REJECTED_MESSAGE,
+  PAUSED_HINT,
   TOOL_ERROR_MESSAGES,
   WAIT_HINTS,
   directConnectHint,
   enterHint,
+  notListeningHint,
+  pingHint,
   signalingErrorMessage,
   signalingNoticeHint,
 } from './messages.js';
@@ -30,6 +43,10 @@ export interface ToolDeps {
   readonly log: LogPort;
   /** 프로세스 종료가 시작되면 취소된다. 대기 중인 wait 을 커서를 옮기지 않고 끝낸다. */
   readonly shutdownSignal: AbortSignal;
+  /** 관전 명령(monitor_command)을 만드는 진입점. null 이면 monitor_command 가 null 이다. */
+  readonly monitorLauncher: MonitorLauncher | null;
+  /** tool 호출 하나가 끝났다(결과를 돌려주기 직전). 수신 상태 파일을 맞춘다. 던지면 무시한다. */
+  readonly onToolDone?: (name: ToolName, ok: boolean) => void;
 }
 
 /** tool 이름. AGENT_CHAT_CHANNEL=off 면 confirm_channel 을 뺀다. */
@@ -40,6 +57,7 @@ export const TOOL_NAMES: readonly ToolName[] = Object.freeze([
   'get_status',
   'set_status',
   'send_message',
+  'ping_room',
   'wait_for_messages',
   'confirm_channel',
   'start_test',
@@ -117,6 +135,12 @@ const SHAPES = {
       .nullable()
       .optional()
       .describe(`A short note for the other participants, at most ${L.NOTE_MAX_CHARS} characters. null clears it.`),
+    listening: z
+      .literal(false)
+      .optional()
+      .describe(
+        'Pass false only right before you have to end your turn without waiting (your user gave you other work). The room sees at once that you are not listening. Your next wait_for_messages resumes listening.',
+      ),
   },
   send_message: {
     text: bytesMax(LIMITS.CHAT_MAX_TEXT_BYTES).describe(
@@ -132,6 +156,17 @@ const SHAPES = {
       .max(ID_MAX_CHARS)
       .optional()
       .describe('message_id of an earlier send whose result had ack_timeout. Sends the same message again under the same id.'),
+  },
+  ping_room: {
+    timeout_sec: z
+      .number()
+      .int()
+      .min(L.PING_TIMEOUT_SEC.min)
+      .max(L.PING_TIMEOUT_SEC.max)
+      .optional()
+      .describe(
+        `How long to wait for read receipts from listening participants, ${L.PING_TIMEOUT_SEC.min}-${L.PING_TIMEOUT_SEC.max} seconds. Default ${L.PING_TIMEOUT_SEC.default}.`,
+      ),
   },
   wait_for_messages: {
     timeout_sec: z
@@ -201,10 +236,13 @@ const DESCRIPTIONS: { readonly [N in ToolName]: string } = Object.freeze({
   leave_room:
     'Leave the room. Events not yet delivered to you are discarded (the count is returned; their text stays in the local transcript file). Leaving the service under test is not a reason to call this.',
   get_status:
-    'Show the room, the participants and how each is shown (shown_as), the current test with its recent scenarios (test.scenarios.items), claim counts, the claims waiting for your verification with what to check (claims.waiting_for_you), the delivery mode and warnings. A waiting claim with text_omitted=true has its text left out to keep the result small: verify the earlier ones first, then call again.',
-  set_status: 'Tell the room your own tools, role and state. Only the fields you pass change. You cannot set anything for another participant.',
+    'Show the room, the participants and how each is shown (shown_as), the observers watching read-only (observers), the current test with its recent scenarios (test.scenarios.items), claim counts, the claims waiting for your verification with what to check (claims.waiting_for_you), the delivery mode and warnings. room.monitor_command is the command your user can run to watch this room from a console. A waiting claim with text_omitted=true has its text left out to keep the result small: verify the earlier ones first, then call again.',
+  set_status:
+    'Tell the room your own tools, role and state. Only the fields you pass change. You cannot set anything for another participant. listening=false tells the room right away that you stop listening (use it only when you must end your turn without waiting).',
   send_message:
-    'Send a chat message to the whole room, or only to the named participants. It goes directly to each recipient. "delivered" means the recipient process stored it, not that its agent has read it. For a recipient with ack_timeout the outcome is unknown: call again with resend_of.',
+    'Send a chat message to the whole room, or only to the named participants. It goes directly to each recipient. "delivered" means the recipient process stored it, not that its agent has read it; not_listening lists recipients whose agent is not waiting for room messages now, so a reply may be late. For a recipient with ack_timeout the outcome is unknown: call again with resend_of.',
+  ping_room:
+    'Check, without help from anyone, whether messages reach each participant and whether its agent is listening. Sends a fixed check message that needs no reply; reading it sends a read receipt automatically. Returns per participant delivered_ms (its process stored it), read_ms (its agent read it) and outcome (read, not_listening, not_read, no_ack, not_connected). Use it when your user asks whether the chat works or why replies are slow.',
   wait_for_messages:
     'Wait for the next room events: chat, participant changes, and test, scenario, claim and verification changes. Returns at once when events are pending. A "timeout" result is normal: call again with next_cursor. At most 20 events per call; when more=true call again right away.',
   confirm_channel:
@@ -298,6 +336,7 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
         notice.unreachable = fromSessionNotice.unreachable;
       }
     }
+    if (inboxNotice.unread !== undefined) notice.unread = inboxNotice.unread;
     if (inboxNotice.pushed_since_last_call !== undefined) notice.pushed_since_last_call = inboxNotice.pushed_since_last_call;
     if (inboxNotice.delivery !== undefined) notice.delivery = inboxNotice.delivery;
     if (fromSessionNotice?.record_failed === true) notice.record_failed = true;
@@ -341,6 +380,11 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
       outcome = failure('INTERNAL_ERROR');
       result = render(outcome, undefined);
     }
+    try {
+      deps.onToolDone?.(name, outcome.ok);
+    } catch {
+      // 상태 파일은 보조 수단이다. tool 결과를 막지 않는다.
+    }
     log.event('info', 'mcp-server', 'tool.call', {
       tool: name,
       outcome: outcome.ok ? 'ok' : 'error',
@@ -369,8 +413,11 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
         name: entered.name,
         you: entered.you,
         participants: entered.participants,
+        observers: entered.observers,
         test: entered.test,
         delivery_mode: deliveryMode,
+        // 이 PC 의 사용자가 방을 콘솔로 지켜보는 명령(관전. architecture.md 3.14).
+        monitor_command: monitorCommand(deps.monitorLauncher, entered.room_id, entered.server),
         hint: enterHint({ channelDeclared, deliveryMode, customRoomId: args.room_id !== undefined, created: true }),
       });
     }),
@@ -389,6 +436,8 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
         // 자기 presence. 재입장이면 옛 역할과 도구를 이어받았다(검토 1차 PRODUCT-R1-01). participants 는 자신을 뺀다.
         you: entered.you,
         participants: entered.participants,
+        // 들어온 때 이미 방을 지켜보던 관전자. 감시받는다는 사실을 숨기지 않는다.
+        observers: entered.observers,
         test: entered.test,
         delivery_mode: deliveryMode,
         hint: enterHint({ channelDeclared, deliveryMode, customRoomId: false, created: false }),
@@ -409,9 +458,10 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
       if (droppedCount > 0) warnings.push({ code: 'inbox_dropped', count: droppedCount });
       for (const problem of configNotice) warnings.push({ code: 'config', name: problem.name, reason: problem.reason });
       return success({
-        room: status.room,
+        room: { ...status.room, monitor_command: monitorCommand(deps.monitorLauncher, status.room.room_id, status.room.server) },
         delivery_mode: inbox.mode(),
         participants: status.participants,
+        observers: status.observers,
         test: status.test,
         claims: status.claims,
         warnings,
@@ -420,13 +470,33 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
   );
 
   mcp.registerTool('set_status', { ...meta('set_status'), inputSchema: SHAPES.set_status }, (args) =>
-    handle('set_status', undefined, async () =>
-      fromSession(await session.command(withoutUndefined({ type: 'set_status' as const, ...args }))),
-    ),
+    handle('set_status', undefined, async () => {
+      // 듣지 않는다는 알림: 방에 있을 때만 수신함을 멈춘다. presence 에는 room-session 이 그 값을 바로 쓴다.
+      if (args.listening === false && session.notice() !== null) inbox.pauseListening();
+      const result = fromSession(await session.command(withoutUndefined({ type: 'set_status' as const, ...args })));
+      if (!result.ok || args.listening !== false) return result;
+      return success({ ...result.value, hint: PAUSED_HINT });
+    }),
   );
 
   mcp.registerTool('send_message', { ...meta('send_message'), inputSchema: SHAPES.send_message }, (args) =>
-    handle('send_message', undefined, async () => fromSession(await session.sendChat(withoutUndefined({ ...args })))),
+    handle('send_message', undefined, async () => {
+      const result = fromSession(await session.sendChat(withoutUndefined({ ...args })));
+      if (!result.ok || result.value.not_listening === undefined || result.value.not_listening.length === 0) return result;
+      return success({ ...result.value, hint: notListeningHint(result.value.not_listening.map((entry) => entry.name)) });
+    }),
+  );
+
+  mcp.registerTool('ping_room', { ...meta('ping_room'), inputSchema: SHAPES.ping_room }, (args) =>
+    handle('ping_room', undefined, async () => {
+      const seconds = args.timeout_sec ?? L.PING_TIMEOUT_SEC.default;
+      const result = fromSession(await session.ping({ timeoutMs: seconds * 1000 }));
+      if (!result.ok) return result;
+      const read = result.value.participants.filter((entry) => entry.outcome === 'read').length;
+      const notListening = result.value.participants.filter((entry) => entry.outcome === 'not_listening').length;
+      const other = result.value.participants.length - read - notListening;
+      return success({ ...result.value, hint: pingHint({ read, notListening, other }) });
+    }),
   );
 
   mcp.registerTool('wait_for_messages', { ...meta('wait_for_messages'), inputSchema: SHAPES.wait_for_messages }, (args, extra) =>

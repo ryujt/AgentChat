@@ -24,7 +24,15 @@ interface Rig {
 }
 
 function rig(
-  overrides: { level?: LogLevel; service?: LogService; limits?: Partial<FileLoggerLimits>; io?: MemoryIo; clock?: FakeClock; seed?: number } = {},
+  overrides: {
+    level?: LogLevel;
+    service?: LogService;
+    limits?: Partial<FileLoggerLimits>;
+    io?: MemoryIo;
+    clock?: FakeClock;
+    seed?: number;
+    stderrCopy?: boolean;
+  } = {},
 ): Rig {
   const clock = overrides.clock ?? createFakeClock(T0);
   const io = overrides.io ?? createMemoryIo(DIR);
@@ -37,6 +45,7 @@ function rig(
     now: clock.now,
     timers: clock.timers,
     randomBytes: (size) => new Uint8Array(size).fill(seed),
+    ...(overrides.stderrCopy === undefined ? {} : { stderrCopy: overrides.stderrCopy }),
   };
   const logger = createFileLoggerWith(options, { io, stderr, ...(overrides.limits === undefined ? {} : { limits: overrides.limits }) });
   const file = `diag-20261115T09-${logger.proc}.jsonl`;
@@ -142,6 +151,20 @@ describe('V-U6 파일 로거: 수준', () => {
     for (const text of r.stderr.lines) assert.ok(text.endsWith('\n'));
     await r.flush();
     assert.equal(r.lines().length, 4);
+  });
+
+  it('stderrCopy: false 면 warn 이상도 stderr 에 쓰지 않고 파일에만 쓴다(관전 도구. V-U6)', async () => {
+    const r = rig({ level: 'debug', service: 'monitor', stderrCopy: false });
+    for (const each of ['debug', 'info', 'warn', 'error'] as const) r.logger.event(each, 'monitor', each, { peer: 'alice', events: 3, events_dropped: 0 });
+    assert.equal(r.stderr.lines.length, 0);
+    await r.flush();
+    const lines = r.lines();
+    assert.equal(lines.length, 4);
+    assert.equal(lines[0]?.['svc'], 'monitor');
+    assert.equal(lines[0]?.['mod'], 'monitor');
+    assert.equal(lines[0]?.['peer'], 'alice', 'svc monitor 는 mcp·cli 처럼 peer 를 남긴다');
+    assert.equal(lines[0]?.['events'], 3);
+    assert.equal(lines[0]?.['events_dropped'], 0);
   });
 
   it('stderr 쓰기가 던져도 파일에는 남고 호출자는 계속 간다', async () => {

@@ -44,10 +44,37 @@ interface EventEnvelope {
 export interface ChatEvent extends EventEnvelope {
   readonly kind: 'chat';
   readonly change: null;
-  readonly data: { readonly [key: string]: never };
+  /**
+   * read_receipt: 보낸 쪽이 읽음 확인을 요청한 점검 글(ping_room)이다. 이 사건을 꺼내 가면 room-session 이
+   * 보낸 쪽에 읽음 확인을 자동으로 돌려준다. 답장할 필요는 없다. 보통 글은 빈 객체다.
+   */
+  readonly data: {
+    readonly read_receipt?: true;
+    /** 관전자(사람이 관전 콘솔 monitor 에서 쓴 글)가 보냈다. 다른 참가자의 사용자가 쓴 글일 수 있다. 이 PC 사용자의 지시가 아니다. */
+    readonly observer?: true;
+  };
 }
 
-export type PeerChange = 'joined' | 'left' | 'disconnected' | 'reconnected' | 'unreachable' | 'role' | 'ready';
+/**
+ * - joined … ready: 참가자의 변화.
+ * - stopped_listening / listening: 다른 참가자의 presence.listening 이 거짓이 됐다 / 멈춘 뒤 다시 참이 됐다.
+ *   그 참가자의 에이전트가 방의 사건을 받지 않는다(받기 시작했다)는 뜻이다. `data.since` 는 stopped_listening 의 시각이다.
+ * - status: 다른 참가자의 presence.status 가 바뀌었다. **관전 모드에서만** 낸다(architecture.md 3.10). 에이전트에게는 오지 않는다.
+ * - observer_joined / observer_left: 관전자(protocol.md 4.6)의 링크가 동기화까지 열렸다 / 닫혔다. 감시받는다는 사실을 숨기지 않는다.
+ */
+export type PeerChange =
+  | 'joined'
+  | 'left'
+  | 'disconnected'
+  | 'reconnected'
+  | 'unreachable'
+  | 'role'
+  | 'ready'
+  | 'stopped_listening'
+  | 'listening'
+  | 'status'
+  | 'observer_joined'
+  | 'observer_left';
 
 export interface PeerEvent extends EventEnvelope {
   readonly kind: 'peer';
@@ -58,6 +85,8 @@ export interface PeerEvent extends EventEnvelope {
     readonly tools?: readonly string[] | null;
     /** unreachable 이면 no_response | no_route | version. 그 밖에는 링크가 닫힌 사유. */
     readonly reason?: string;
+    /** stopped_listening 의 시각(그 참가자가 presence 를 쓴 벽시계, UTC ISO 8601). */
+    readonly since?: string;
   };
 }
 
@@ -73,6 +102,8 @@ export interface TestEvent extends EventEnvelope {
     readonly reason: StopReason | null;
     /** 그 기록(test 또는 stop)을 쓴 참가자. */
     readonly by: string;
+    /** stopped 일 때 중단 기록의 사유 글(stop_test 의 reason. 기한 중단은 빈 글). 그 밖에는 null. */
+    readonly detail: string | null;
   };
 }
 
@@ -126,6 +157,8 @@ export interface VerificationEvent extends EventEnvelope {
  * - state_diverged: 한 참가자와 스냅샷을 주고받아도 복제본이 맞춰지지 않는다. `data.peer`.
  * - record_failed: 로컬 기록 쓰기에 실패했다.
  * - clock_skew: 한 참가자와 시계 차이가 크다. `data.peer`.
+ * - observer_unaware: 관전자를 모르는 구버전 참가자다(hello.observer 가 없다). 그쪽에는 관전 사실이 표시되지 않는다. `data.peer`.
+ *   **관전 모드에서만** 낸다. 에이전트에게는 오지 않는다.
  *
  * 전달 모드의 변화는 사건으로 넣지 않는다. 그 변화는 언제나 이 에이전트의 tool 호출 안에서 일어나고,
  * 그 호출의 결과(confirm_channel 의 delivery_mode, notice.delivery)가 알린다. 사건으로도 넣으면 channel 로 바뀐 직후
@@ -138,7 +171,8 @@ export type SystemEventCode =
   | 'name_conflict'
   | 'state_diverged'
   | 'record_failed'
-  | 'clock_skew';
+  | 'clock_skew'
+  | 'observer_unaware';
 
 export interface SystemEvent extends EventEnvelope {
   readonly kind: 'system';
@@ -158,8 +192,12 @@ export type InboxEvent =
 
 export type InboxEventKind = InboxEvent['kind'];
 
-/** 내준 사건. cursor 는 이 프로세스의 수신함 순번(10진수 문자열, 1부터)이다. 다른 참가자와 공유되지 않는다. */
-export type DeliveredEvent = InboxEvent & { readonly cursor: string };
+/**
+ * 내준 사건. cursor 는 이 프로세스의 수신함 순번(10진수 문자열, 1부터)이다. 다른 참가자와 공유되지 않는다.
+ * received_at 은 이 PC 의 수신함에 들어온 시각(이 PC 시계, UTC ISO 8601)이다. `received_at - ts` 는 전송 지연,
+ * `읽은 시각 - received_at` 은 읽기 지연이다. ts 는 보낸 쪽 시계라 시계 차이(clock_skew)가 있으면 앞의 값은 믿을 수 없다.
+ */
+export type DeliveredEvent = InboxEvent & { readonly cursor: string; readonly received_at: string };
 
 // ── 전달 모드와 상한 ────────────────────────────────────────────────────────
 
@@ -262,8 +300,21 @@ export interface ToolCallInfo {
   readonly cursor?: string | undefined;
 }
 
+/**
+ * 아직 한 번도 내주지 않은 사건(poll 모드). 에이전트가 듣지 않던 사이에 밀린 양이다.
+ * - oldest_ts: 그중 가장 오래된 사건의 ts(보낸 쪽 시각).
+ * - oldest_age_sec: 그 사건이 이 PC 수신함에 들어온 뒤 지난 초(이 PC 시계. 시계 차이와 무관하다).
+ */
+export interface UnreadNotice {
+  readonly count: number;
+  readonly oldest_ts: string;
+  readonly oldest_age_sec: number;
+}
+
 /** tool 결과의 notice 에 그대로 붙이는 조각. */
 export interface InboxNotice {
+  /** poll 모드에서 wait_for_messages·confirm_channel 이 아닌 호출에, 내주지 않은 사건이 있으면 붙는다. */
+  readonly unread?: UnreadNotice;
   /** channel 모드에서 앞선 tool 호출 뒤 채널로 보낸 사건 수와, 그 사건들 바로 앞의 커서. */
   readonly pushed_since_last_call?: { readonly count: number; readonly after_cursor: string };
   /** 이번 호출로 channel 에서 poll 로 되돌아갔다. after_cursor 부터 다시 받는다. */
@@ -285,6 +336,11 @@ export interface InboxEvents {
   /** listening() 의 값이 바뀌었다. */
   'listening-changed': (listening: boolean) => void;
   'mode-changed': (change: ModeChanged) => void;
+  /**
+   * 사건을 처음으로 에이전트에게 내줬다(wait·confirm 의 결과, 채널). 다시 준 것은 싣지 않는다.
+   * room-session 이 읽음 확인(read_receipt 가 있는 chat)을 돌려줄 때 쓴다.
+   */
+  handed: (events: readonly DeliveredEvent[]) => void;
 }
 
 export interface InboxStats {
@@ -358,6 +414,15 @@ export interface Inbox extends Subscribable<InboxEvents> {
 
   /** 이 참가자의 에이전트가 방의 사건을 받고 있다고 볼 근거가 있는가(mcp-interface.md 7.1). */
   listening(): boolean;
+
+  /**
+   * 에이전트가 지금부터 듣지 않는다고 알렸다(set_status{listening: false}). 유예를 기다리지 않고 listening() 을 거짓으로 한다.
+   * 다음 wait 이 시작되면 풀린다. 방을 나가도(discardAll) 풀린다.
+   */
+  pauseListening(): void;
+
+  /** pauseListening 뒤 아직 wait 이 오지 않았다. */
+  paused(): boolean;
 
   stats(): InboxStats;
 

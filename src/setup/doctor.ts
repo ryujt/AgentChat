@@ -7,7 +7,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { randomLowerAlnum, type Now, type RandomBytes, type Timers } from '../protocol/index.js';
 import type { HostCli } from './host-cli.js';
 import type { LaunchMcp, McpProcess } from './mcp-process.js';
-import { getArgs, launchOf, mcpEntryPath, parseGet, type LaunchCommand } from './registration.js';
+import { readGeminiRegistration, type GeminiSettingsPaths } from './gemini-config.js';
+import { getArgs, launchOf, mcpEntryPath, parseGet, type LaunchCommand, type Lookup } from './registration.js';
 import { HOST_LABEL, MIN_NODE_MAJOR, nodeMajorOf, type HostKind, type Outcome, type Reporter, type StepNote } from './types.js';
 
 export interface DoctorLimits {
@@ -59,6 +60,8 @@ export interface DoctorDeps {
   readonly nodeVersion: string;
   /** 등록을 볼 호스트 CLI. 없는 호스트는 넣어도 된다(D2 가 건너뛴다). */
   readonly hosts: readonly HostCli[];
+  /** Gemini CLI 의 등록을 읽을 설정 파일. 생략하면 Gemini CLI 의 등록은 없는 것으로 본다. */
+  readonly geminiSettings?: GeminiSettingsPaths;
   /** create_room 에 줄 서버 주소. null 이면 주지 않는다(등록된 환경 또는 공용 서버). */
   readonly server: string | null;
   readonly launch: LaunchMcp;
@@ -252,12 +255,18 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorResult> {
     const targets: { host: HostKind; launch: LaunchCommand }[] = [];
     const notes: string[] = [];
     for (const cli of deps.hosts) {
-      const result = await cli.run(getArgs(cli.host));
+      // Gemini CLI 는 `mcp get` 이 없어 등록을 설정 파일로 읽는다. 실행 파일이 없으면 등록도 쓰이지 않으므로 먼저 본다.
+      const result = await cli.run(cli.host === 'gemini' ? ['--version'] : getArgs(cli.host));
       if (result.outcome === 'not-found') {
         notes.push(`${HOST_LABEL[cli.host]}: CLI 없음`);
         continue;
       }
-      const lookup = parseGet(cli.host, result);
+      const lookup: Lookup =
+        cli.host === 'gemini'
+          ? deps.geminiSettings === undefined
+            ? { state: 'absent' }
+            : readGeminiRegistration(deps.geminiSettings)
+          : parseGet(cli.host, result);
       const launch = lookup.state === 'present' ? launchOf(lookup.registration, deps.appRoot) : null;
       if (launch !== null) {
         targets.push({ host: cli.host, launch });

@@ -47,6 +47,8 @@ interface Entry {
   pushedAt: number | null;
   /** 누락 알림 사건이면 그것이 대신하는 사건 수. 보통 사건은 0. */
   readonly dropCount: number;
+  /** 수신함에 넣은 시각(이 PC 시계). 밀린 시간(notice.unread)의 기준이다. */
+  readonly receivedAt: number;
 }
 
 interface Waiter {
@@ -103,6 +105,8 @@ export const createInbox: CreateInbox = (deps) => {
   let waiter: Waiter | null = null;
   let lastWaitEndedAt: number | null = null;
   let listeningNow = false;
+  /** 에이전트가 듣지 않는다고 알렸다(pauseListening). 다음 wait 이 풀어 준다. */
+  let pausedNow = false;
   let graceTimer: { readonly handle: unknown } | null = null;
   let dropped = 0;
   /** 마지막 tool 호출 뒤 채널로 보낸 사건 수와, 그 사건들 바로 앞의 순번. */
@@ -113,6 +117,7 @@ export const createInbox: CreateInbox = (deps) => {
   const listeners: { [E in keyof InboxEvents]: ListenerRecord<E>[] } = {
     'listening-changed': [],
     'mode-changed': [],
+    handed: [],
   };
 
   // ── 이벤트 ────────────────────────────────────────────────────────────────
@@ -183,7 +188,11 @@ export const createInbox: CreateInbox = (deps) => {
   }
 
   function markDelivered(batch: Batch, via: 'poll' | 'confirm' | 'recheck'): void {
-    for (const entry of batch.entries) entry.handed = true;
+    const fresh: DeliveredEvent[] = [];
+    for (const entry of batch.entries) {
+      if (!entry.handed) fresh.push(entry.delivered);
+      entry.handed = true;
+    }
     if (batch.last > deliveredUpTo) deliveredUpTo = batch.last;
     log.event('info', 'inbox', 'inbox.delivered', {
       via,
@@ -192,6 +201,7 @@ export const createInbox: CreateInbox = (deps) => {
       more: batch.more,
       msg_id: chatIds(batch),
     });
+    if (fresh.length > 0) emit('handed', fresh);
   }
 
   function isoNow(): string {
@@ -200,9 +210,11 @@ export const createInbox: CreateInbox = (deps) => {
   }
 
   function makeEntry(seq: number, event: InboxEvent, dropCount: number): Entry {
-    const delivered = { cursor: String(seq), ...event } as DeliveredEvent;
+    const at = now();
+    const receivedAt = Number.isFinite(at) ? at : 0;
+    const delivered = { cursor: String(seq), ...event, received_at: new Date(receivedAt).toISOString() } as DeliveredEvent;
     const bytes = Buffer.byteLength(JSON.stringify(delivered), 'utf8');
-    return { seq, delivered, bytes, handed: false, pushedAt: null, dropCount };
+    return { seq, delivered, bytes, handed: false, pushedAt: null, dropCount, receivedAt };
   }
 
   function makeDropMarker(seq: number, count: number): Entry {
@@ -265,6 +277,7 @@ export const createInbox: CreateInbox = (deps) => {
 
   /** listening 이 거짓으로 바뀔 시각. 그럴 일이 없으면 null. */
   function listeningDeadline(): number | null {
+    if (pausedNow) return null;
     if (mode === 'poll') {
       if (waiter !== null || lastWaitEndedAt === null) return null;
       return lastWaitEndedAt + limits.LISTEN_GRACE_MS;
@@ -274,6 +287,11 @@ export const createInbox: CreateInbox = (deps) => {
   }
 
   function computeListening(): boolean {
+    return !pausedNow && receiving();
+  }
+
+  /** 받는 근거가 있는가. 듣지 않는다는 알림(pausedNow)은 보지 않는다. channel 모드의 수신 불명 판정이 이것을 쓴다. */
+  function receiving(): boolean {
     if (mode === 'poll') {
       if (waiter !== null) return true;
       return lastWaitEndedAt !== null && now() - lastWaitEndedAt < limits.LISTEN_GRACE_MS;
@@ -361,6 +379,8 @@ export const createInbox: CreateInbox = (deps) => {
     }
     // 동시에 걸린 wait 은 하나다. 먼저 온 쪽을 빈 결과로 끝낸다.
     settleWaiter((from) => emptyResult('timeout', from));
+    // 다시 기다리기 시작했다. 듣지 않는다는 알림을 푼다.
+    pausedNow = false;
 
     if (mode === 'channel') {
       const result = waitInChannelMode(options);
@@ -440,6 +460,7 @@ export const createInbox: CreateInbox = (deps) => {
       kind: entry.delivered.kind,
       msg_id: entry.delivered.kind === 'chat' ? entry.delivered.id : null,
     });
+    emit('handed', [entry.delivered]);
     return { type: 'event', event: entry.delivered };
   }
 
@@ -531,12 +552,32 @@ export const createInbox: CreateInbox = (deps) => {
     return { delivery: { mode: 'poll', reason: 'channel_unconfirmed', after_cursor: String(after) } };
   }
 
+  /** 한 번도 내주지 않은 사건의 수와 가장 오래된 것. 없으면 null. */
+  function unread(): InboxNotice['unread'] | null {
+    let count = 0;
+    let oldest: Entry | null = null;
+    for (const entry of queue) {
+      if (entry.handed) continue;
+      count += entry.dropCount > 0 ? entry.dropCount : 1;
+      if (oldest === null) oldest = entry;
+    }
+    if (oldest === null) return null;
+    const age = Math.max(0, now() - oldest.receivedAt);
+    return { count, oldest_ts: oldest.delivered.ts, oldest_age_sec: Math.round(age / 100) / 10 };
+  }
+
   function noteToolCall(call: ToolCallInfo): InboxNotice {
-    if (closed || mode !== 'channel') return {};
+    if (closed) return {};
+    if (mode !== 'channel') {
+      // 밀린 양을 먼저 보인다. 사건을 꺼내는 호출(wait_for_messages, confirm_channel)은 결과 자체가 그 사건이다.
+      if (call.name === WAIT_TOOL || call.name === 'confirm_channel') return {};
+      const pending = unread();
+      return pending === null ? {} : { unread: pending };
+    }
     const isWait = call.name === WAIT_TOOL;
     const confirms = isWait && parseCursor(call.cursor) !== null;
     // 수신 불명에서 되돌아가지 않는 호출은 "여기까지 봤다"는 확인 하나뿐이다.
-    if (!confirms && !computeListening()) return revertToPoll();
+    if (!confirms && !receiving()) return revertToPoll();
     const notice: InboxNotice =
       !confirms && pushedCount > 0
         ? { pushed_since_last_call: { count: pushedCount, after_cursor: String(pushedAfter) } }
@@ -583,6 +624,7 @@ export const createInbox: CreateInbox = (deps) => {
     deliveredUpTo = nextSeq - 1;
     confirmedUpTo = deliveredUpTo;
     pushedCount = 0;
+    pausedNow = false;
     if (total > 0) log.event('info', 'inbox', 'inbox.discarded', { unseen });
     refresh();
     return unseen;
@@ -613,6 +655,13 @@ export const createInbox: CreateInbox = (deps) => {
     noteToolCall,
     mode: () => mode,
     listening: () => !closed && computeListening(),
+    pauseListening() {
+      if (closed || pausedNow) return;
+      pausedNow = true;
+      log.event('info', 'inbox', 'delivery.paused', {});
+      refresh();
+    },
+    paused: () => pausedNow,
     stats,
     close,
   } satisfies Inbox;

@@ -82,7 +82,8 @@ export function bigBurst(totalBytes) {
   const marker = `END-${Math.random().toString(36).slice(2, 10)}`;
   // 사건 하나의 봉투(cursor, id, from, ts 등)가 165바이트쯤 된다. cursor 가 프로세스 시작 시각(ms)에서 시작해 13자리라
   // 1~2자리였을 때(150바이트쯤)보다 12바이트쯤 길다(검토 2차 PRODUCT-R2-01).
-  const each = Math.max(40, Math.floor(totalBytes / EVENTS_PER_RESULT) - 165);
+  // 2026-11-16 부터 사건마다 received_at(`,"received_at":"…Z"` 42바이트)이 붙어 210바이트쯤이다.
+  const each = Math.max(40, Math.floor(totalBytes / EVENTS_PER_RESULT) - 210);
   const ops = [];
   for (let i = 1; i <= EVENTS_PER_RESULT; i += 1) {
     const head = `big ${i}/${EVENTS_PER_RESULT} `;

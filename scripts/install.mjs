@@ -5,12 +5,11 @@
 // 이 파일을 실행한다. sh 가 없는 곳(Windows)에서는 이 파일을 직접 실행한다.
 //
 // 사용법:
-//   node scripts/install.mjs [--client claude|codex|all] [--in-place]   # 설치 또는 갱신
-//   node scripts/install.mjs [--client claude|codex|all] --remove       # MCP 등록 제거
+//   node scripts/install.mjs [--client claude|codex|gemini|all]            # 설치 또는 갱신
+//   node scripts/install.mjs [--client claude|codex|gemini|all] --remove       # MCP 등록 제거
 //
 // 환경변수 (모두 선택):
-//   AGENT_CHAT_HOME        설치 뿌리 (기본값: ~/.agent-chat). 저장소는 <AGENT_CHAT_HOME>/app 에 둔다
-//   AGENT_CHAT_IN_PLACE    1 이면 --in-place 와 같다(이 자리의 저장소를 그대로 등록한다. 개발용)
+//   AGENT_CHAT_HOME        기록·로그·백업을 두는 곳 (기본값: ~/.agent-chat). 저장소는 받은 자리에서 그대로 설치한다
 //   AGENT_CHAT_CLAUDE_BIN  Claude Code CLI 실행 파일 (기본값: claude)
 //   AGENT_CHAT_CODEX_BIN   Codex CLI 실행 파일 (기본값: codex)
 //   AGENT_CHAT_SERVER      연결 점검이 쓸 서버 주소 (기본값: 공용 서버)
@@ -34,8 +33,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 var MIN_NODE_MAJOR = 22;
-var REPOSITORY = 'https://github.com/ryujt/AgentChat';
-var CLIENTS = ['claude', 'codex', 'all'];
+var CLIENTS = ['claude', 'codex', 'gemini', 'all'];
 var EXIT_FAILED = 1;
 
 var root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -52,21 +50,20 @@ function step(id, title, outcome, detail) {
 function usage() {
   process.stderr.write(
     [
-      '사용법: node scripts/install.mjs [--client claude|codex|all] [--remove] [--in-place]',
+      '사용법: node scripts/install.mjs [--client claude|codex|gemini|all] [--remove]',
       '  --client     등록할 호스트 (기본값: all)',
       '  --remove     MCP 등록을 지운다. 기록과 저장소는 지우지 않는다',
-      '  --in-place   <AGENT_CHAT_HOME>/app 이 아닌 이 자리의 저장소를 그대로 등록한다(개발용)',
       '',
     ].join('\n'),
   );
 }
 
 function parseArgs(argv) {
-  var options = { client: 'all', remove: false, inPlace: process.env.AGENT_CHAT_IN_PLACE === '1' };
+  var options = { client: 'all', remove: false };
   for (var index = 0; index < argv.length; index += 1) {
     var arg = argv[index];
     if (arg === '--remove') options.remove = true;
-    else if (arg === '--in-place') options.inPlace = true;
+    else if (arg === '--in-place') continue; // 예전 옵션. 이제 늘 이 자리에서 설치한다
     else if (arg === '--client' && CLIENTS.indexOf(argv[index + 1]) >= 0) {
       options.client = argv[index + 1];
       index += 1;
@@ -111,22 +108,16 @@ function checkNode() {
   return false;
 }
 
-function checkLocation(inPlace) {
+/** 저장소를 받은 자리에서 그대로 설치한다. 등록은 이 자리의 절대 경로를 쓴다. */
+function checkLocation() {
   var expected = path.join(installHome(), 'app');
   if (realPath(root) === realPath(expected)) {
     step(2, '설치 위치', '통과', root);
     return true;
   }
-  if (inPlace) {
-    step(2, '설치 위치', '통과', '이 자리의 저장소를 등록한다(' + root + ')');
-    say('  경고: MCP 등록은 절대 경로를 쓴다. 이 폴더를 옮기거나 지우면 등록이 깨진다.');
-    return true;
-  }
-  step(2, '설치 위치', '실패', '설치 위치가 아니다(' + root + '). 등록하지 않았다');
-  say('  다음 명령으로 설치한다:');
-  say('    git clone ' + REPOSITORY + ' "' + expected + '" && sh "' + path.join(expected, 'installer', 'install.sh') + '"');
-  say('  개발용으로 이 자리의 저장소를 등록하려면 AGENT_CHAT_IN_PLACE=1 을 준다(install.mjs 를 직접 실행할 때는 --in-place).');
-  return false;
+  step(2, '설치 위치', '통과', '이 자리의 저장소를 등록한다(' + root + ')');
+  say('  참고: MCP 등록은 이 폴더의 절대 경로를 쓴다. 폴더를 옮기거나 지우면 이 설치기를 다시 실행한다.');
+  return true;
 }
 
 function buildPackage() {
@@ -164,8 +155,9 @@ function remove(client) {
   if (fs.existsSync(cliPath)) return runCli(['setup', '--remove', '--client', client]);
   say('실패: 빌드 결과(' + cliPath + ')가 없어 제거를 실행하지 못했다. 제거하려고 빌드하지는 않는다.');
   say('아래 명령을 직접 실행한다:');
-  if (client !== 'codex') say('  claude mcp remove --scope user agent-chat');
-  if (client !== 'claude') say('  codex mcp remove agent-chat');
+  if (client === 'all' || client === 'claude') say('  claude mcp remove --scope user agent-chat');
+  if (client === 'all' || client === 'codex') say('  codex mcp remove agent-chat');
+  if (client === 'all' || client === 'gemini') say('  gemini mcp remove --scope user agent-chat');
   return EXIT_FAILED;
 }
 
@@ -177,7 +169,7 @@ function main() {
   }
   if (!checkNode()) return EXIT_FAILED;
   if (options.remove) return remove(options.client);
-  if (!checkLocation(options.inPlace)) return EXIT_FAILED;
+  if (!checkLocation()) return EXIT_FAILED;
   if (!buildPackage()) return EXIT_FAILED;
   if (!checkNative()) return EXIT_FAILED;
   return runCli(['setup', '--client', options.client]);

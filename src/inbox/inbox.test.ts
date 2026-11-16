@@ -78,8 +78,9 @@ describe('V-U4 inbox: poll 전달과 커서', () => {
   });
 
   it('넣은 순서대로, 1부터 시작하는 커서를 붙여 준다. 사건의 내용은 바꾸지 않는다', async () => {
-    const { inbox } = setup();
+    const { inbox, clock } = setup();
     const first = chatEvent('강사 화면에서 손들기 표시가 보입니다');
+    const at = new Date(clock.now()).toISOString();
     inbox.push(first);
     inbox.push(testStoppedEvent());
     const result = await inbox.wait({ timeoutMs: 1000 });
@@ -87,8 +88,9 @@ describe('V-U4 inbox: poll 전달과 커서', () => {
     assert.deepEqual(cursors(result), ['1', '2']);
     assert.equal(result.next_cursor, '2');
     assert.equal(result.more, false);
-    assert.deepEqual(result.events[0], { cursor: '1', ...first });
-    assert.deepEqual(result.events[1], { cursor: '2', ...testStoppedEvent() });
+    // received_at 은 이 PC 의 수신함에 들어온 시각이다(개선안 P2).
+    assert.deepEqual(result.events[0], { cursor: '1', ...first, received_at: at });
+    assert.deepEqual(result.events[1], { cursor: '2', ...testStoppedEvent(), received_at: at });
   });
 
   it('사건이 없으면 기한에 빈 timeout 으로 끝난다. 받은 커서를 그대로 돌려준다', async () => {
@@ -430,9 +432,10 @@ describe('V-U4 inbox: 점검과 channel 모드', () => {
     const { inbox, clock, toChannel, channelEvents } = setup();
     await toChannel();
     const event = chatEvent('채널로 가는 글');
+    const at = new Date(clock.now()).toISOString();
     inbox.push(event);
     await flush();
-    assert.deepEqual(channelEvents(), [{ cursor: '1', ...event }]);
+    assert.deepEqual(channelEvents(), [{ cursor: '1', ...event, received_at: at }]);
 
     const result = await inbox.wait({ timeoutMs: 50_000 });
     assert.deepEqual(result, { status: 'channel_mode', events: [], next_cursor: '0', more: false });
@@ -552,11 +555,21 @@ describe('V-U4 inbox: 점검과 channel 모드', () => {
     assert.deepEqual(inbox.noteToolCall({ name: 'get_status' }), {}, '확인 호출이 집계를 비웠다');
   });
 
-  it('poll 모드의 tool 호출에는 아무 것도 붙지 않는다', () => {
-    const { inbox } = setup();
-    inbox.push(numberedChat(1));
-    assert.deepEqual(inbox.noteToolCall({ name: 'get_status' }), {});
+  it('poll 모드의 tool 호출에는 밀린 양(unread)만 붙는다. 사건을 꺼내는 호출에는 붙지 않는다', async () => {
+    const { inbox, clock } = setup();
+    assert.deepEqual(inbox.noteToolCall({ name: 'get_status' }), {}, '밀린 것이 없으면 아무 것도 없다');
+    const first = numberedChat(1);
+    inbox.push(first);
+    clock.advance(31_000);
+    inbox.push(numberedChat(2));
+    clock.advance(400);
+    assert.deepEqual(inbox.noteToolCall({ name: 'get_status' }), {
+      unread: { count: 2, oldest_ts: first.ts, oldest_age_sec: 31.4 },
+    });
     assert.deepEqual(inbox.noteToolCall({ name: 'wait_for_messages' }), {});
+    assert.deepEqual(inbox.noteToolCall({ name: 'confirm_channel' }), {});
+    await inbox.wait({ timeoutMs: 0 });
+    assert.deepEqual(inbox.noteToolCall({ name: 'send_message' }), {}, '꺼내 간 뒤에는 붙지 않는다');
   });
 });
 
@@ -1093,5 +1106,51 @@ describe('V-U4 inbox: Subscribable 적합성', () => {
         }
       },
     };
+  });
+});
+
+describe('V-U4 inbox: 듣기 멈춤 알림과 꺼내 간 사건 (개선안 P4·P6)', () => {
+  it('pauseListening 은 유예를 기다리지 않고 listening 을 거짓으로 하고, 다음 wait 이 푼다', async () => {
+    const { inbox, listening } = setup();
+    await inbox.wait({ timeoutMs: 0 });
+    assert.equal(inbox.listening(), true);
+    inbox.pauseListening();
+    assert.deepEqual([inbox.listening(), inbox.paused()], [false, true]);
+    assert.deepEqual(listening, [true, false]);
+    const pending = inbox.wait({ timeoutMs: 1000 });
+    assert.deepEqual([inbox.listening(), inbox.paused()], [true, false]);
+    inbox.push(numberedChat(1));
+    await pending;
+  });
+
+  it('channel 모드에서 멈춰도 다른 tool 호출이 poll 로 되돌리지 않는다', async () => {
+    const { inbox, toChannel } = setup();
+    await toChannel();
+    inbox.pauseListening();
+    assert.equal(inbox.listening(), false);
+    assert.deepEqual(inbox.noteToolCall({ name: 'set_status' }), {});
+    assert.equal(inbox.mode(), 'channel');
+  });
+
+  it('방을 나가면(discardAll) 멈춤이 풀린다', () => {
+    const { inbox } = setup();
+    inbox.pauseListening();
+    inbox.discardAll();
+    assert.equal(inbox.paused(), false);
+  });
+
+  it('handed 는 처음 내준 사건만 한 번 알린다(wait 결과와 채널)', async () => {
+    const { inbox, toChannel } = setup();
+    const handed: string[][] = [];
+    inbox.on('handed', (events) => handed.push(events.map((event) => event.cursor)));
+    inbox.push(numberedChat(1));
+    inbox.push(numberedChat(2));
+    await inbox.wait({ timeoutMs: 0 });
+    await inbox.wait({ cursor: '0', timeoutMs: 0 });
+    assert.deepEqual(handed, [['1', '2']], '다시 준 것은 알리지 않는다');
+    await toChannel();
+    inbox.push(numberedChat(3));
+    await flush();
+    assert.deepEqual(handed, [['1', '2'], ['3']]);
   });
 });

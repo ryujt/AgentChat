@@ -103,6 +103,7 @@
 | **연결되지 않은 참가자는 준비 완료가 아님** | `shown_as` 규칙 | `V-U9`, `V-L4` |
 | **대상 서비스에서 나가도 Agent Chat 연결 유지** | 방 연결은 대상 서비스와 무관. `leave_room` 규칙, instructions | `V-L8` |
 | **방 참여로 권한 제한을 우회할 수 없음** | [권한 경계](mcp-interface.md#10-권한-경계) | `V-U8`, `V-L7`, `V-S1`, `V-I1`, `V-I6` |
+| **콘솔 관전** (PRD 밖. 사용자 요청 2026-11-16) | 관전자 참가자([protocol.md 4.6](protocol.md#46-관전자)), `room-session` 의 관전 모드와 `monitor` 모듈([architecture.md 3.10](architecture.md#310-room-session), [3.14](architecture.md#314-monitor), [S16](architecture.md#s16-콘솔에서-방을-지켜본다-관전)), `get_status.observers`·`monitor_command`([mcp-interface.md 3.4](mcp-interface.md#34-get_status)) | `V-U12`, `V-U8`, `V-L13`, `V-P8` |
 
 ### 4.2 완료 기준
 

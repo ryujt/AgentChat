@@ -23,7 +23,7 @@
 | 패키지 | 단일 npm 패키지, `"type": "module"`, `"private": true` | 설치는 저장소를 받아서 한다. 실수로 배포되지 않게 한다 |
 | Node | `>=22` | 통합 담당의 방향. 조사는 Node 26 에서만 했다(다른 버전은 미실행). Lambda 는 `nodejs24.x` 에서 돈다([deployment.md 2.3](deployment.md#23-lambda-핸들러)) |
 | 언어 | TypeScript, `strict`, 모듈 해석 NodeNext | `node-datachannel` 타입이 이 설정에서 통과했다 **[실측 PRE-RTC-18]** |
-| `bin` | `agent-chat-mcp` → `dist/entry/mcp.js`, `agent-chat-server` → `dist/entry/server.js`, `agent-chat` → `dist/entry/cli.js` | [architecture.md 1절](architecture.md#1-구성-요소와-프로세스-경계) |
+| `bin` | `agent-chat-mcp` → `dist/entry/mcp.js`, `agent-chat-server` → `dist/entry/server.js`, `agent-chat` → `dist/entry/cli.js`, `agent-chat-monitor` → `dist/entry/monitor.js`(관전. 2026-11-16 추가) | [architecture.md 1절](architecture.md#1-구성-요소와-프로세스-경계) |
 
 **의존성** (버전은 정확히 고정한다)
 
@@ -113,6 +113,7 @@ tests/support/proc.mjs               # 프로세스 띄우기와 "남은 프로�
 | **W7** 진단 로그 | 파일·stdout 로거, 필드 필터, 보존 정리 | `src/diagnostics/**` (`log-port.ts`, `contract.ts` 제외) | `log-port.ts`, `diagnostics/contract.ts` | `V-U6` 통과 | `npm test` |
 | **W8** 설치와 안내 | 설치 진입 셸 스크립트(`installer/install.sh`, `claude.sh`, `codex.sh`)와 그 시험(`installer/*.test.mjs`), 설치 본체(`scripts/install.mjs`), MCP 등록과 제거, Channels 판정, `doctor`, 설치 시험 스크립트, **설정 전후 비교 도구**(`tests/e2e/install/settings-snapshot.mjs`), 저장소 README, 에이전트 안내 | `installer/**`, `scripts/install.mjs`, `src/setup/**`, `src/entry/cli.ts`, `tests/e2e/install/**`, 저장소 `README.md`, `docs/agent-guide.md` | 진입점 이름(2절), [mcp-interface.md](mcp-interface.md), `protocol/local-files.ts` | `V-L10` 통과(셸 진입점 시험과 비교 도구의 자체 시험 포함). `V-S1`·`V-S2` 를 실행하는 스크립트가 있다(실행은 G7). A-MCP-10 확인 | `node --test installer/*.test.mjs`, `npm run test:e2e -- install`, `sh installer/install.sh`, `agent-chat doctor` |
 | **W9** 조립과 전 구간 검증 (통합 담당. **W0 부터 병행**) | 시험 실행기, MCP 진입점 조립, 전 구간 시나리오, 장시간 시험, 이력 색인 | `src/entry/mcp.ts`, `tests/e2e/run.mjs`, `tests/e2e/scenarios/**`, `tests/test-history/README.md` | 전부 | `V-L2`~`V-L9`, `V-L7`(나), `V-P2`~`V-P7`, `V-S1`, `V-S2`, `V-I*` 실행과 기록 | `npm run test:e2e` |
+| **W10** 콘솔 관전 (사용자 요청 2026-11-16. 마감 뒤 추가) | `hello.observer`, `room-session` 의 관전 모드와 관전자 링크 처리(`observers.ts`), `get_status.observers`·`monitor_command`, 관전 도구 모듈과 조립, 셸 진입점, 관전 시험 | `src/monitor/**`, `src/entry/monitor.ts`, `scripts/monitor.sh`, `src/room-session/observers.ts`(+ `room-session`·`inbox`·`diagnostics`·`mcp-server`·`protocol` 의 해당 부분), `tests/e2e/scenarios/v-l13.mjs`, `tests/e2e/public/v-p8-monitor.mjs` | [protocol.md 4.6](protocol.md#46-관전자), [architecture.md 3.10·3.14·S16](architecture.md#314-monitor) | `V-U12`, `V-U8`, `V-L13`, `V-P8` 통과 | `npm test`, `npm run test:e2e -- scenarios/v-l13`, `node tests/e2e/public/v-p8-monitor.mjs` |
 
 묶음별 메모:
 

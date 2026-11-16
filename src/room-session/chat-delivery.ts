@@ -42,6 +42,13 @@ export interface ChatSendOutcome {
   readonly result: SessionResult<ChatSent>;
   /** 거절했으면 null. */
   readonly sent: SentChat | null;
+  /** 보낸 시각과 수신자별 ack 를 받은 시각. 거절했으면 없다. 점검(ping_room)이 지연을 잰다. */
+  readonly timing?: { readonly sentAt: number; readonly ackedAt: ReadonlyMap<string, number> };
+}
+
+export interface ChatSendOptions {
+  /** chat.rr 을 단다. 받는 쪽 에이전트가 읽으면 ack{read: true} 가 온다. awaitReads 로 기다린다. */
+  readonly readReceipt?: boolean;
 }
 
 export type IncomingChat =
@@ -56,9 +63,17 @@ export type IncomingChat =
 
 export interface ChatDelivery {
   /** 수신자에게 직접 보내고 수신자별 ack 를 기다린다. reject 하지 않는다. */
-  send(args: SendChatArgs, targets: ChatTargets): Promise<ChatSendOutcome>;
-  /** 받은 ack 하나. 기한 뒤에 온 것도 받아 미확인 집계와 보낸 버퍼를 고친다. */
-  ack(peer: string, id: string): void;
+  send(args: SendChatArgs, targets: ChatTargets, options?: ChatSendOptions): Promise<ChatSendOutcome>;
+  /**
+   * 받은 ack 하나. 기한 뒤에 온 것도 받아 미확인 집계와 보낸 버퍼를 고친다.
+   * read 가 참이면 읽음 확인이다. 읽음 확인을 요청한 글(readReceipt)에만 받아 적는다.
+   */
+  ack(peer: string, id: string, read?: boolean): void;
+  /**
+   * 읽음 확인을 요청한 글 하나의 읽음 확인을 기다린다. peers 전원이 읽었거나 timeoutMs 가 지나면,
+   * 그때까지 읽음 확인을 보낸 피어와 그 시각을 돌려준다(peers 밖의 피어도 싣는다). 끝나면 그 글의 기록을 지운다.
+   */
+  awaitReads(id: string, peers: readonly string[], timeoutMs: number): Promise<ReadonlyMap<string, number>>;
   /** 받은 chat 하나를 가른다. 수신함과 기록에 넣는 일은 부르는 쪽이 한다. */
   accept(peer: string, frame: ChatFrame, self: string): IncomingChat;
   /** 그 피어의 링크가 닫혔다. 기다리던 ack 는 결과 불명(ack_timeout)으로 끝낸다. */
@@ -86,6 +101,8 @@ interface Operation {
   readonly waiting: Set<string>;
   readonly delivered: Set<string>;
   readonly failed: Map<string, Undelivered['reason']>;
+  readonly ackedAt: Map<string, number>;
+  readonly sentAt: number;
   readonly sent: SentChat;
   timer: TimerHandle | null;
   resolve: (outcome: ChatSendOutcome) => void;
@@ -114,6 +131,10 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
   /** 최근에 본 chat.id. 넣은 순서가 오래된 순서다. */
   const seen = new Set<string>();
   const received = new Map<string, number[]>();
+  /** 읽음 확인을 요청한 글별로, 읽음 확인을 보낸 피어와 그 시각. awaitReads 가 끝나면 지운다. */
+  const reads = new Map<string, Map<string, number>>();
+  /** 읽음 확인이 올 때마다 부르는 대기. */
+  const readWaiters = new Set<() => void>();
 
   const unackedOf = (peer: string): Set<string> => {
     let ids = unacked.get(peer);
@@ -140,6 +161,7 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
     operation.resolve({
       result: { ok: true, message_id: operation.entry.id, delivered, undelivered },
       sent: operation.sent,
+      timing: { sentAt: operation.sentAt, ackedAt: operation.ackedAt },
     });
   };
 
@@ -158,8 +180,9 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
     args: SendChatArgs,
     targets: ChatTargets,
     now: number,
+    readReceipt: boolean,
   ): { entry: SentEntry; recipients: string[]; fresh: boolean } | ChatSendOutcome => {
-    if (args.resend_of !== undefined) {
+    if (args.resend_of !== undefined && !readReceipt) {
       const entry = sentBuffer.get(args.resend_of);
       if (entry === undefined) return fail('INVALID_ARGUMENT', 'resend_of is not in the sent buffer');
       // 대상은 처음에 전달되지 않은 참가자다. 그 가운데 지금 연결된 참가자에게만 프레임이 간다.
@@ -180,7 +203,15 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
     const id = makeEntryId(deps.sid, seq);
     if (!id.ok) return fail('INVALID_ARGUMENT', 'message id space is exhausted');
     // 글자 수와 따로, 직렬화한 프레임의 크기도 보내기 전에 본다. 받는 쪽이 거절할 프레임을 만들지 않는다.
-    const frame = encodeP2PFrame({ v: LIMITS.P2P_VERSION, t: 'chat', id: id.value, to, text: args.text, wall: now });
+    const frame = encodeP2PFrame({
+      v: LIMITS.P2P_VERSION,
+      t: 'chat',
+      id: id.value,
+      to,
+      text: args.text,
+      wall: now,
+      ...(readReceipt ? { rr: true as const } : {}),
+    });
     if (!frame.ok) return fail('INVALID_ARGUMENT', frame.detail);
     const recipients = to ?? [...targets.open, ...targets.absent.filter((name) => !targets.open.includes(name))];
     const entry: SentEntry = {
@@ -195,10 +226,10 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
   };
 
   return {
-    send(args, targets) {
+    send(args, targets, options) {
       if (closed) return Promise.resolve(fail('CANCELLED', 'the session is shutting down'));
       const now = deps.now();
-      const prepared = prepare(args, targets, now);
+      const prepared = prepare(args, targets, now, options?.readReceipt === true);
       if ('result' in prepared) return Promise.resolve(prepared);
 
       prune(sendTimes, now, LIMITS.CHAT_RATE_WINDOW_MS);
@@ -220,6 +251,7 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
         seq += 1;
         remember(entry);
       }
+      if (options?.readReceipt === true) reads.set(entry.id, new Map());
 
       const open = new Set(targets.open);
       const waiting = new Set<string>();
@@ -244,6 +276,8 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
           waiting,
           delivered: new Set(),
           failed,
+          ackedAt: new Map(),
+          sentAt: now,
           sent: { to: entry.to, text: entry.text, targets: waiting.size, bytes: entry.bytes },
           timer: null,
           resolve,
@@ -260,13 +294,21 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
       });
     },
 
-    ack(peer, id) {
+    ack(peer, id, read = false) {
+      if (read) {
+        const readers = reads.get(id);
+        if (readers === undefined || readers.has(peer)) return;
+        readers.set(peer, deps.now());
+        for (const wake of [...readWaiters]) wake();
+        return;
+      }
       unacked.get(peer)?.delete(id);
       let matched = false;
       for (const operation of [...operations]) {
         if (operation.entry.id !== id || !operation.waiting.delete(peer)) continue;
         matched = true;
         operation.delivered.add(peer);
+        operation.ackedAt.set(peer, deps.now());
         if (operation.waiting.size === 0) finish(operation);
       }
       // 기한 뒤에 온 ack: 호출은 이미 ack_timeout 으로 끝났다. 다음 resend_of 의 대상에서만 뺀다.
@@ -295,6 +337,31 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
       return { kind: 'new', to: frame.to === null ? 'room' : 'you' };
     },
 
+    awaitReads(id, peers, timeoutMs) {
+      const readers = reads.get(id);
+      if (readers === undefined) return Promise.resolve(new Map());
+      return new Promise<ReadonlyMap<string, number>>((resolve) => {
+        let timer: TimerHandle | null = null;
+        const done = (): void => {
+          readWaiters.delete(check);
+          if (timer !== null) deps.timers.clearTimeout(timer);
+          timer = null;
+          reads.delete(id);
+          resolve(new Map(readers));
+        };
+        const check = (): void => {
+          if (closed || peers.every((peer) => readers.has(peer))) done();
+        };
+        readWaiters.add(check);
+        check();
+        if (!readWaiters.has(check)) return;
+        timer = deps.timers.setTimeout(() => {
+          timer = null;
+          done();
+        }, Math.max(0, timeoutMs));
+      });
+    },
+
     peerClosed(peer) {
       unacked.delete(peer);
       for (const operation of [...operations]) {
@@ -308,6 +375,7 @@ export function createChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
     close() {
       if (closed) return;
       closed = true;
+      for (const wake of [...readWaiters]) wake();
       for (const operation of [...operations]) {
         operations.delete(operation);
         if (operation.timer !== null) deps.timers.clearTimeout(operation.timer);

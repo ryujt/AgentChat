@@ -10,8 +10,8 @@ import { CHANNEL_CAPABILITY, CHANNEL_NOTIFICATION_METHOD, PROBE_CONTENT, neutral
 const HOST_META_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const ALLOWED_KEYS = ['kind', 'change', 'msg_id', 'from', 'to', 'ts', 'cursor', 'ref', 'token'];
 
-function delivered<T extends object>(event: T, cursor = '184'): T & { cursor: string } {
-  return { cursor, ...event };
+function delivered<T extends object>(event: T, cursor = '184'): T & { cursor: string; received_at: string } {
+  return { cursor, ...event, received_at: '2026-11-15T02:10:00.300Z' };
 }
 
 const claim: ClaimEvent = {

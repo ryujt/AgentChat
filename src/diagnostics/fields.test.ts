@@ -147,8 +147,8 @@ describe('V-U6 peer 필드와 svc', () => {
     }
   });
 
-  it('svc 가 mcp·cli 면 peer 를 출력한다', () => {
-    for (const service of ['mcp', 'cli'] as const) {
+  it('svc 가 mcp·cli·monitor 면 peer 를 출력한다', () => {
+    for (const service of ['mcp', 'cli', 'monitor'] as const) {
       const out = line({ peer: 'alice' }, service);
       assert.equal(out['peer'], 'alice', service);
     }

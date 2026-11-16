@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { readInstallerEnv, type EnvMap } from './installer-env.js';
 import { runRemove, runSetup, type SetupDeps } from './setup.js';
@@ -35,6 +35,7 @@ interface World {
 interface WorldOptions {
   readonly claude?: FakeHostOptions;
   readonly codex?: FakeHostOptions;
+  readonly gemini?: FakeHostOptions;
   readonly hub?: FakeHubOptions;
   readonly env?: EnvMap;
   /** Codex 가 등록을 쓰는 파일이 설치가 고치는 파일과 다르다. */
@@ -62,6 +63,7 @@ function world(name: string, options: WorldOptions = {}): World {
   const hosts: Record<HostKind, FakeHost> = {
     claude: createFakeHost('claude', options.claude),
     codex: createFakeHost('codex', { configPath: options.codexWritesElsewhere === true ? elsewhere : codexConfig, ...options.codex }),
+    gemini: createFakeHost('gemini', { configPath: join(base, 'user home', '.gemini', 'settings.json'), ...options.gemini }),
   };
   const hub = createFakeHub(options.hub);
   const lines: string[] = [];
@@ -741,5 +743,58 @@ describe('setup: 제거', () => {
     assert.match(w.text(), /사용자 조치 필요 — user 가 아닌 scope\(project\)/);
     assert.equal(w.hosts.claude.scopes.has('project'), true);
     assert.deepEqual(w.hosts.claude.calls.filter((call) => call[1] === 'remove'), []);
+  });
+});
+
+describe('setup: Gemini CLI', () => {
+  const settingsPath = (w: World): string => w.deps.env.geminiSettings.user;
+  const entryOf = (w: World): Record<string, unknown> | undefined =>
+    (JSON.parse(readFileSync(settingsPath(w), 'utf8')) as { mcpServers?: Record<string, Record<string, unknown>> }).mcpServers?.['agent-chat'];
+
+  it('사용자 설정에 등록하고(채널 끔, 대기 100초) 확인한다. 다시 실행하면 이미 등록됨이고, 제거하면 지운다', async () => {
+    const w = world('gemini');
+    mkdirSync(dirname(settingsPath(w)), { recursive: true });
+    writeFileSync(settingsPath(w), JSON.stringify({ theme: 'dark', mcpServers: { other: { command: 'x' } } }));
+    assert.equal(await runSetup(w.deps, ['gemini']), 0, w.text());
+    assert.deepEqual(w.adds('gemini').map((call) => call.slice(0, 4)), [['mcp', 'add', '--scope', 'user']]);
+    const entry = entryOf(w);
+    assert.deepEqual([entry?.['command'], entry?.['args']], [NODE, [w.entry]]);
+    assert.deepEqual(entry?.['env'], { AGENT_CHAT_CLIENT: 'gemini-cli', AGENT_CHAT_NAME: 'gemini-aaaa', AGENT_CHAT_WAIT_MAX_SEC: '100', AGENT_CHAT_CHANNEL: 'off' });
+    const settings = JSON.parse(readFileSync(settingsPath(w), 'utf8')) as Record<string, unknown>;
+    assert.equal(settings['theme'], 'dark', '다른 설정은 그대로다');
+    assert.ok(/\[8\] 등록 확인 \(Gemini CLI\): 통과/.test(w.text()), w.text());
+    assert.ok(/\[9\] Channels \(Gemini CLI\): 불가/.test(w.text()), w.text());
+    assert.ok(readdirSync(join(w.home, 'backups')).some((name) => name.startsWith('gemini-settings-')), '고치기 전 설정을 백업했다');
+
+    const again = world('gemini');
+    mkdirSync(dirname(settingsPath(again)), { recursive: true });
+    writeFileSync(settingsPath(again), readFileSync(settingsPath(w), 'utf8').replaceAll(w.entry, again.entry));
+    assert.equal(await runSetup(again.deps, ['gemini']), 0, again.text());
+    assert.deepEqual(again.adds('gemini'), [], '같으면 다시 등록하지 않는다');
+    assert.ok(/\[7\] MCP 등록 \(Gemini CLI\): 건너뜀 — 이미 등록됨/.test(again.text()), again.text());
+
+    assert.equal(await runRemove(again.deps, ['gemini']), 0, again.text());
+    assert.equal(entryOf(again), undefined);
+  });
+
+  it('사용자가 더한 설정(trust 등)이 있고 명령이 다르면 다시 등록하지 않고 사용자 조치로 멈춘다', async () => {
+    const w = world('gemini-extra');
+    mkdirSync(dirname(settingsPath(w)), { recursive: true });
+    writeFileSync(settingsPath(w), JSON.stringify({ mcpServers: { 'agent-chat': { command: '/old/node', args: ['/old/dist/entry/mcp.js'], env: {}, trust: true } } }));
+    assert.equal(await runSetup(w.deps, ['gemini']), 2, w.text());
+    assert.deepEqual(w.adds('gemini'), []);
+    assert.ok(/사용자 조치 필요 — 기존 등록에 설치가 정하지 않는 설정\(trust\)/.test(w.text()), w.text());
+    assert.equal(entryOf(w)?.['trust'], true);
+  });
+
+  it('작업 폴더의 .gemini/settings.json 에 같은 이름의 등록이 있으면 손대지 않는다', async () => {
+    const w = world('gemini-project', { cwd: 'proj' });
+    const project = w.deps.env.geminiSettings.project;
+    assert.ok(project !== null);
+    mkdirSync(dirname(project), { recursive: true });
+    writeFileSync(project, JSON.stringify({ mcpServers: { 'agent-chat': { command: 'x', args: [] } } }));
+    assert.equal(await runSetup(w.deps, ['gemini']), 2, w.text());
+    assert.deepEqual(w.adds('gemini'), []);
+    assert.ok(/user 가 아닌 scope\(project\)/.test(w.text()), w.text());
   });
 });

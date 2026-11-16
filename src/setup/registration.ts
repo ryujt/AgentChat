@@ -3,18 +3,19 @@
 
 import { join } from 'node:path';
 import { isPeerName, randomLowerAlnum, type RandomBytes } from '../protocol/index.js';
-import type { HostCliResult } from './host-cli.js';
+import { readGeminiRegistration, type GeminiSettingsPaths } from './gemini-config.js';
+import type { HostCli, HostCliResult } from './host-cli.js';
 import { MCP_ENTRY_SEGMENTS, SERVER_NAME, type HostKind } from './types.js';
 
 /** `presence.client` 에 쓰이는 값. */
-export const CLIENT_ID: Readonly<Record<HostKind, string>> = { claude: 'claude-code', codex: 'codex' };
+export const CLIENT_ID: Readonly<Record<HostKind, string>> = { claude: 'claude-code', codex: 'codex', gemini: 'gemini-cli' };
 
 /** 등록하는 이름의 앞부분. 뒤에 무작위 4자가 붙는다. */
-const NAME_PREFIX: Readonly<Record<HostKind, string>> = { claude: 'claude', codex: 'codex' };
+const NAME_PREFIX: Readonly<Record<HostKind, string>> = { claude: 'claude', codex: 'codex', gemini: 'gemini' };
 const NAME_SUFFIX_LENGTH = 4;
 
 /** `wait_for_messages` 한 번의 최대 대기(architecture.md 5절). */
-export const WAIT_MAX_SEC = { claude: 100, codexWithTimeout: 540, fallback: 50 } as const;
+export const WAIT_MAX_SEC = { claude: 100, codexWithTimeout: 540, gemini: 100, fallback: 50 } as const;
 /** Codex 설정에 넣는 tool 호출 한도. 대기 상한 540초보다 길어야 한다. */
 export const CODEX_TOOL_TIMEOUT_SEC = 600;
 
@@ -31,6 +32,7 @@ const ENV_HOME = 'AGENT_CHAT_HOME';
 const MANAGED_ENV: Readonly<Record<HostKind, readonly string[]>> = {
   claude: [ENV_CLIENT, ENV_NAME, ENV_WAIT, ENV_HOME],
   codex: [ENV_CLIENT, ENV_NAME, ENV_WAIT, ENV_CHANNEL, ENV_HOME],
+  gemini: [ENV_CLIENT, ENV_NAME, ENV_WAIT, ENV_CHANNEL, ENV_HOME],
 };
 
 export interface LaunchCommand {
@@ -68,15 +70,21 @@ export function mcpEntryPath(appRoot: string): string {
   return join(appRoot, ...MCP_ENTRY_SEGMENTS);
 }
 
-export function getArgs(host: HostKind): readonly string[] {
+/** `mcp get` 의 인자. Gemini CLI 에는 없다(설정 파일로 읽는다. lookupRegistration). */
+export function getArgs(host: Exclude<HostKind, 'gemini'>): readonly string[] {
   return host === 'claude' ? ['mcp', 'get', SERVER_NAME] : ['mcp', 'get', SERVER_NAME, '--json'];
 }
 
 export function removeArgs(host: HostKind): readonly string[] {
-  return host === 'claude' ? ['mcp', 'remove', '--scope', 'user', SERVER_NAME] : ['mcp', 'remove', SERVER_NAME];
+  return host === 'codex' ? ['mcp', 'remove', SERVER_NAME] : ['mcp', 'remove', '--scope', 'user', SERVER_NAME];
 }
 
 export function addArgs(host: HostKind, launch: LaunchCommand): readonly string[] {
+  if (host === 'gemini') {
+    // Gemini CLI 는 `--` 를 받지 않는다. 이름, 명령, 인자를 위치 인자로 준다.
+    const env = Object.entries(launch.env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+    return ['mcp', 'add', '--scope', 'user', ...env, SERVER_NAME, launch.command, ...launch.args];
+  }
   const flag = host === 'claude' ? '-e' : '--env';
   const head = host === 'claude' ? ['mcp', 'add', '--scope', 'user', SERVER_NAME] : ['mcp', 'add', SERVER_NAME];
   const env = Object.entries(launch.env).flatMap(([key, value]) => [flag, `${key}=${value}`]);
@@ -113,7 +121,8 @@ export function expectedLaunch(host: HostKind, options: ExpectedOptions): Launch
     [ENV_NAME]: options.name,
     [ENV_WAIT]: String(options.waitMaxSec),
   };
-  if (host === 'codex') env[ENV_CHANNEL] = 'off';
+  // Codex 와 Gemini CLI 에는 채널 알림이 없다. 점검 알림을 보내지 않고 confirm_channel 도 등록하지 않는다.
+  if (host !== 'claude') env[ENV_CHANNEL] = 'off';
   if (options.agentHome !== undefined && options.agentHome !== null) env[ENV_HOME] = options.agentHome;
   for (const [key, value] of Object.entries(options.extraEnv ?? {})) {
     if (!(key in env)) env[key] = value;
@@ -275,8 +284,14 @@ export function parseCodexGet(result: HostCliResult): Lookup {
   };
 }
 
-export function parseGet(host: HostKind, result: HostCliResult): Lookup {
+export function parseGet(host: Exclude<HostKind, 'gemini'>, result: HostCliResult): Lookup {
   return host === 'claude' ? parseClaudeGet(result) : parseCodexGet(result);
+}
+
+/** 호스트의 등록을 읽는다. Claude Code·Codex 는 `mcp get`, Gemini CLI 는 설정 파일이다. */
+export async function lookupRegistration(cli: HostCli, gemini: GeminiSettingsPaths): Promise<Lookup> {
+  if (cli.host === 'gemini') return readGeminiRegistration(gemini);
+  return parseGet(cli.host, await cli.run(getArgs(cli.host)));
 }
 
 // ── 사람이 손으로 실행할 명령 ────────────────────────────────────────────────

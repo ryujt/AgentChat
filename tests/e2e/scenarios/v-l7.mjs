@@ -45,8 +45,8 @@ async function capability() {
   report.check('L7-02', cap.client.getInstructions() === INSTRUCTIONS, 'instructions 가 제품 문구 그대로다');
   report.check(
     'L7-03',
-    tools.length === 14 && JSON.stringify(tools.map((tool) => tool.name).sort()) === JSON.stringify([...TOOL_NAMES].sort()),
-    'tool 14개',
+    tools.length === 15 && JSON.stringify(tools.map((tool) => tool.name).sort()) === JSON.stringify([...TOOL_NAMES].sort()),
+    'tool 15개',
     tools.length,
   );
   report.check('L7-04', version.name === 'agent-chat' && version.version === packageVersion, '서버 정보: agent-chat, package.json 의 버전', version);
@@ -55,8 +55,8 @@ async function capability() {
   const offTools = (await off.client.listTools()).tools;
   report.check(
     'L7-05',
-    off.client.getServerCapabilities().experimental === undefined && offTools.length === 13 && !offTools.some((tool) => tool.name === 'confirm_channel'),
-    'AGENT_CHAT_CHANNEL=off: experimental 없음, confirm_channel 없음(13개)',
+    off.client.getServerCapabilities().experimental === undefined && offTools.length === 14 && !offTools.some((tool) => tool.name === 'confirm_channel'),
+    'AGENT_CHAT_CHANNEL=off: experimental 없음, confirm_channel 없음(14개)',
   );
   await cap.close();
   await off.close();

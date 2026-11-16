@@ -13,13 +13,13 @@ import { defineShellTests } from '../tests/e2e/install/shell-cases.mjs';
 
 defineShellTests('install.sh', ['claude', 'codex']);
 
-const SCRIPTS = { 'install.sh': 'all', 'claude.sh': 'claude', 'codex.sh': 'codex' };
+const SCRIPTS = { 'install.sh': 'all', 'claude.sh': 'claude', 'codex.sh': 'codex', 'gemini.sh': 'gemini' };
 const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
 /** 머리 주석 뒤의 본문. */
 const body = (name) => read(name).slice(read(name).indexOf('\nset -eu\n'));
 
-describe('V-L10 (나) 셸 진입점 세 개', () => {
-  test('세 스크립트는 넘기는 --client 값과 이름만 다르다', () => {
+describe('V-L10 (나) 셸 진입점 네 개', () => {
+  test('네 스크립트는 넘기는 --client 값과 이름만 다르다', () => {
     for (const [name, client] of Object.entries(SCRIPTS)) {
       assert.ok(body(name).includes(`\nCLIENT=${client}\n`), name);
       assert.ok(body(name).includes(`\nSCRIPT_NAME=${name}\n`), name);
@@ -58,7 +58,7 @@ describe('V-L10 (나) 셸 진입점 세 개', () => {
       const head = read(name).slice(0, read(name).indexOf('\nset -eu\n'));
       assert.match(head, new RegExp(`# 사용법:\\n#   sh installer/${name.replace('.', '\\.')} `), name);
       assert.match(head, /# 환경변수/, name);
-      for (const variable of ['AGENT_CHAT_NODE', 'AGENT_CHAT_HOME', 'AGENT_CHAT_SERVER', 'AGENT_CHAT_IN_PLACE']) assert.ok(head.includes(variable), `${name}: ${variable}`);
+      for (const variable of ['AGENT_CHAT_NODE', 'AGENT_CHAT_HOME', 'AGENT_CHAT_SERVER']) assert.ok(head.includes(variable), `${name}: ${variable}`);
     }
     assert.ok(read('claude.sh').includes('AGENT_CHAT_CLAUDE_BIN') && !read('claude.sh').includes('AGENT_CHAT_CODEX_BIN'));
     assert.ok(read('codex.sh').includes('AGENT_CHAT_CODEX_BIN') && !read('codex.sh').includes('AGENT_CHAT_CLAUDE_BIN'));

@@ -16,4 +16,5 @@ export const TOOL_INPUT_LIMITS: ToolInputLimits = Object.freeze({
   TEST_DURATION_MIN: Object.freeze({ min: 1, max: 480, default: 60 }),
   TEST_SCENARIOS: Object.freeze({ min: 1, max: 100, default: 20 }),
   WAIT_MAX_SEC: Object.freeze({ min: 5, max: 540, default: 50 }),
+  PING_TIMEOUT_SEC: Object.freeze({ min: 1, max: 60, default: 15 }),
 });

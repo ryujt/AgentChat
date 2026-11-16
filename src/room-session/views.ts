@@ -4,7 +4,16 @@
 import { utf8ByteLength } from '../protocol/index.js';
 import type { ReportClaim, ReportInput, ReportParticipant } from '../records/contract.js';
 import type { ClaimView, PresenceView, ReplicaView, ScenarioView, TestView } from '../shared-state/contract.js';
-import type { ClaimCounts, LinkStatus, ParticipantView, ScenarioItem, TestStatus, WaitingClaim } from './contract.js';
+import type {
+  ClaimCounts,
+  LinkStatus,
+  ObservedClaim,
+  ObservedScenario,
+  ParticipantView,
+  ScenarioItem,
+  TestStatus,
+  WaitingClaim,
+} from './contract.js';
 import { selfShownAs, shownAs } from './participants.js';
 import type { ShownAsInput } from './participants.js';
 
@@ -62,6 +71,45 @@ export function testStatus(test: TestView | null, scenarios: readonly ScenarioVi
           },
     scenarios: { used: test.scenarios_used, max: test.max_scenarios, items: listed.items, items_omitted: listed.omitted },
   };
+}
+
+/** 관전 요약의 시나리오. 한도 초과를 포함해 전부 싣는다(architecture.md 3.10 의 관전 모드). */
+export function observedScenarios(scenarios: readonly ScenarioView[], now: number): ObservedScenario[] {
+  return scenarios.map((scenario) => ({
+    scenario_id: scenario.scenario_id,
+    index: scenario.index,
+    title: scenario.title,
+    by: scenario.by,
+    plan: scenario.plan,
+    actor: scenario.actor,
+    verifier: scenario.verifier,
+    over_limit: scenario.over_limit,
+    wall: toIso(scenario.wall, now),
+  }));
+}
+
+/** 관전 요약의 주장. 전부 싣는다. 검증은 판정에서 뺀 것(counted 거짓)도 싣는다. */
+export function observedClaims(claims: readonly ClaimView[], now: number): ObservedClaim[] {
+  return claims.map((claim) => ({
+    claim_id: claim.claim_id,
+    scenario_id: claim.scenario_id,
+    by: claim.by,
+    outcome: claim.outcome,
+    action: claim.action,
+    expected: claim.expected,
+    observed: claim.observed,
+    steps: claim.steps,
+    status: claim.status,
+    late: claim.late,
+    wall: toIso(claim.wall, now),
+    verifications: claim.verifications.map((verification) => ({
+      by: verification.by,
+      result: verification.result,
+      evidence: verification.evidence,
+      counted: verification.counted,
+      wall: toIso(verification.wall, now),
+    })),
+  }));
 }
 
 function textBytes(claim: ClaimView): number {

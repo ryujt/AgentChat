@@ -11,9 +11,11 @@ import type {
   ChatSent,
   CommandOutputs,
   ParticipantView,
+  PingSent,
   ReportWritten,
   RoomEntered,
   RoomLeft,
+  RoomObserved,
   RoomSession,
   SessionCommand,
   SessionFailure,
@@ -22,7 +24,7 @@ import type {
   SessionStatus,
 } from '../room-session/contract.js';
 import { loadConfig } from './config.js';
-import type { ConfigProblem, McpConfig, McpServerDeps } from './contract.js';
+import type { ConfigProblem, McpConfig, McpServerDeps, MonitorLauncher } from './contract.js';
 import { DEFAULT_MCP_SERVER_LIMITS } from './limits.js';
 import { createMcpApp } from './server.js';
 import type { McpApp } from './server.js';
@@ -37,6 +39,7 @@ type Responses = {
   join?: SessionResult<RoomEntered>;
   leave?: SessionResult<RoomLeft>;
   sendChat?: SessionResult<ChatSent>;
+  ping?: SessionResult<PingSent>;
   command?: SessionResult<CommandOutputs[keyof CommandOutputs]>;
   status?: SessionResult<SessionStatus>;
   writeReport?: SessionResult<ReportWritten>;
@@ -77,6 +80,7 @@ export function sampleStatus(): SessionStatus {
     participants: [
       { name: 'codex-7f3k', client: 'codex', tools: ['browser'], role: '수강생 A', status: 'ready', link: 'open', listening: true, shown_as: 'ready' },
     ],
+    observers: [],
     test: null,
     claims: { confirmed: 0, refuted: 0, unverified: 0, late: 0, waiting_for_you: [] },
     warnings: [],
@@ -111,6 +115,7 @@ export function createFakeSession(inbox?: Pick<Inbox, 'discardAll'>): FakeSessio
       server: SAMPLE_SERVER,
       name,
       participants: [{ ...SELF, name }],
+      observers: [],
       test: null,
       you: { role: null, tools: [], status: 'joined', note: null, rejoined: false },
     };
@@ -186,10 +191,30 @@ export function createFakeSession(inbox?: Pick<Inbox, 'discardAll'>): FakeSessio
       if (!session.inRoom) return fail('NOT_IN_ROOM');
       return { ok: true, message_id: 'k3x9q0ab12cd-9', delivered: ['codex-7f3k'], undelivered: [] };
     },
+    async ping(args) {
+      note('ping', args);
+      if (responses.ping !== undefined) return responses.ping;
+      if (!session.inRoom) return fail('NOT_IN_ROOM');
+      return {
+        ok: true,
+        message_id: 'k3x9q0ab12cd-10',
+        participants: [{ name: 'codex-7f3k', outcome: 'read', delivered_ms: 12, read_ms: 340, listening: true }],
+        not_listening: [],
+      };
+    },
     async command(command) {
       note('command', command);
       const result = responses.command ?? (session.inRoom ? commandSample(command) : fail('NOT_IN_ROOM'));
       return result as never;
+    },
+    async observe(args) {
+      // mcp-server 는 관전하지 않는다. 부르면 기록에 남아 시험이 알아챈다.
+      note('observe', args);
+      return fail('NOT_IN_ROOM');
+    },
+    observed(): SessionResult<RoomObserved> {
+      note('observed', undefined);
+      return fail('NOT_IN_ROOM');
     },
     status() {
       note('status', undefined);
@@ -227,7 +252,12 @@ export interface TestBed {
 export interface TestBedOptions {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly home?: string;
+  /** 생략하면 SAMPLE_MONITOR_LAUNCHER. */
+  readonly monitorLauncher?: MonitorLauncher | null;
 }
+
+/** 시험의 관전 진입점. 경로에 공백과 작은따옴표를 넣어 인용을 본다. */
+export const SAMPLE_MONITOR_LAUNCHER = { kind: 'sh', path: "/opt/agent chat/it's/scripts/monitor.sh" } as const;
 
 /** 가짜 시계, 실제 수신함, 가짜 세션으로 McpServerDeps 를 만든다. */
 export function createTestBed(options: TestBedOptions = {}): TestBed {
@@ -257,6 +287,7 @@ export function createTestBed(options: TestBedOptions = {}): TestBed {
     now: clock.now,
     timers: clock.timers,
     log,
+    monitorLauncher: options.monitorLauncher === undefined ? SAMPLE_MONITOR_LAUNCHER : options.monitorLauncher,
   };
   return { deps, inbox, session, clock, log, noted, config, problems };
 }

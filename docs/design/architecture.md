@@ -30,6 +30,7 @@ flowchart LR
 | `agent-chat-server` | 공용 IP 를 가진 컴퓨터 | `dist/entry/server.js` | 상주 | 자체 호스팅 시그널링(ws + 메모리) |
 | 공용 서버 Lambda | AWS(API Gateway WebSocket 뒤) | `build/lambda/index.mjs` | 호출마다 | 공용 시그널링(DynamoDB 저장) |
 | 설치·점검 | 각 PC | `installer/*.sh`(셸 진입점), `scripts/install.mjs`, `dist/entry/cli.js` | 1회 실행 | Node 찾기, 의존성 설치, 빌드, MCP 등록, 연결 점검 |
+| 관전(`agent-chat monitor`) | 지켜보는 사람의 PC. 콘솔에서 사람이 실행 | `dist/entry/monitor.js`(`scripts/monitor.sh`, `agent-chat monitor` 가 이것을 실행한다) | Ctrl-C 까지 | 관전자 참가자 한 명. 시그널링 접속, WebRTC mesh, 공유 상태 복제본(읽기만), 방에서 오가는 것을 콘솔에 한 줄씩 출력([3.14](#314-monitor)) |
 
 경계에서 정한 것:
 
@@ -37,6 +38,7 @@ flowchart LR
   - 비용: 호스트가 주는 종료 유예가 짧다(Claude Code 는 SIGINT 뒤 약 500ms **[문서]**). 세션을 다시 열면 mesh 를 처음부터 다시 만든다.
   - 데몬으로 분리할 근거가 생기면(예: 세션 재시작에도 연결을 유지해야 한다는 요구) `room-session` 아래 모듈을 그대로 옮길 수 있게, MCP 어댑터(`mcp-server`)와 참가 로직(`room-session` 이하)을 나눠 둔다.
 - 한 MCP 프로세스는 한 번에 방 하나에만 있는다. PRD 에 여러 방 요구가 없다.
+- **관전 프로세스 하나가 관전자 한 명이다.** MCP 프로세스와 같은 하위 모듈(`room-session` 이하)을 쓰고, MCP 대신 콘솔 출력을 붙인다. 채팅을 서버나 다른 참가자를 거쳐 받지 않는다. 관전자도 기존 참가자 전원과 DataChannel 을 직접 연다([protocol.md 4.6](protocol.md#46-관전자)).
 - 서버는 채팅과 테스트 상태를 보지도 저장하지도 않는다.
 - STUN 은 주소 탐색에만 쓴다. TURN 과 어떤 형태의 데이터 중계도 없다([protocol.md 7절](protocol.md#7-ice-서버-설정-검증)).
 
@@ -57,6 +59,7 @@ flowchart LR
 | `room-session` | 방 참가 한 번의 조율: 입장, mesh 보정, P2P 메시지 처리, 채팅 | MCP |
 | `mcp-server` | MCP tool, instructions, 채널 알림, stdio 수명 | MCP |
 | `setup` | MCP 등록과 제거, Channels 가능 여부 보고, 연결 점검 | CLI |
+| `monitor` | 관전 도구: 인자 해석, 관전 입장, 상태 요약과 사건의 콘솔 출력(사람용 한 줄, JSON Lines), 종료 | 관전 |
 
 ```mermaid
 flowchart TD
@@ -75,6 +78,11 @@ flowchart TD
   SA --> CORE
   EC["entry/cli"] --> SU["setup"]
   SU -.->|"등록된 서버를 띄워 점검 (MCP stdio)"| EM
+  EC -.->|"monitor 하위 명령"| EO["entry/monitor (조립)"]
+  EO --> MO["monitor"]
+  EO --> RS
+  MO --> RS
+  MO --> IB
 ```
 
 - 모든 모듈은 `protocol` 과 `diagnostics` 의 로그 포트(타입)에 의존할 수 있다. 그림에서 생략했다.
@@ -92,7 +100,8 @@ flowchart TD
 - **네트워크, 파일, stdout 에 닿는 모듈을 정해 둔다.**
   - Node 의 네트워크 내장 모듈(`net`, `dgram`, `http`, `https`, `http2`, `tls`)은 `signaling-selfhost` 와 `signaling-client` 만 쓴다. 전역 `WebSocket`·`fetch`·`EventSource` 는 어느 모듈도 쓰지 않는다. 소켓은 `ws`(시그널링)와 `node-datachannel`(P2P)로만 연다.
   - 파일(`fs`)은 `records`, `diagnostics`, `mcp-server`(확인 기록 파일), `setup`, `signaling-selfhost`, `entry` 만 쓴다.
-  - `console` 과 stdout 직접 쓰기는 `diagnostics`, `setup`, `entry/cli`, `entry/server` 만 한다. MCP 프로세스의 stdout 에는 MCP 메시지만 나간다([3.11](#311-mcp-server)).
+  - `console` 과 stdout 직접 쓰기는 `diagnostics`, `setup`, `entry/cli`, `entry/server`, `entry/monitor` 만 한다. MCP 프로세스의 stdout 에는 MCP 메시지만 나간다([3.11](#311-mcp-server)). `monitor` 모듈은 stdout 을 직접 쓰지 않고 출력 함수(`write`)를 주입받는다.
+  - `monitor` 모듈은 `room-session` 과 `inbox` 의 계약(`contract.ts`)만 가져온다(`mcp-server` 와 같은 자리다). 생성과 주입은 `entry/monitor` 가 한다. `entry/monitor` 가 붙일 수 있는 모듈은 `entry/mcp` 에서 `mcp-server`·`inbox` 를 빼고 `monitor` 를 더한 것이다. 환경 변수는 `entry/mcp` 처럼 `process.env` 를 통째로 `monitor` 의 `parseMonitorArgs` 에 넘긴다(`ENTRY_ENV` 의 `whole`). `entry/cli` 는 첫 인자가 `monitor` 이면 `entry/monitor` 를 동적 import 해 넘긴다(같은 `entry` 안이라 경계 검사의 대상이 아니다).
   - `child_process` 는 `setup/host-cli.ts` 한 파일만 쓴다([3.13](#313-setup)).
   - **Node 내장 모듈은 허용 목록으로 정한다.** 제품 코드가 import 할 수 있는 것은 `assert`, `buffer`, `crypto`, `events`, `os`, `path`, `stream`, `string_decoder`, `url`, `util` 과, 위에서 모듈을 정해 둔 `fs`, 네트워크 여섯, `child_process`, `console`, `timers`(조립 파일만)다. 그 밖(`module`, `process`, `vm`, `inspector`, `repl`, `wasi`, `dns`, `perf_hooks`, `worker_threads` 등)은 조립 파일을 포함해 어디서도 쓰지 않는다. 필요해지면 이 목록과 검사에 먼저 더한다.
     - `node:module` 을 막는 이유: `createRequire` 로 부른 모듈은 import 를 읽는 검사에 보이지 않는다. 네트워크 모듈, `child_process`, 외부 SDK 를 모두 그 길로 부를 수 있다. `process.getBuiltinModule` 을 막은 것과 같은 이유다.
@@ -237,7 +246,8 @@ flowchart TD
 ### 3.8 `inbox`
 
 - **책임 / 비책임**: 에이전트에게 전할 사건을 순서대로 보관하고, 한 번에 한 경로(poll 또는 channel)로만 내준다. 전달 모드와 `listening` 값을 소유한다([mcp-interface.md 7절](mcp-interface.md#7-전달-모드)). 사건의 내용은 만들지 않는다.
-- **공개 진입점**: `createInbox({limits, now, timers, log, cursorBase?})` → `push(event)`, `discardAll()`, `wait({cursor, timeoutMs, signal})`, `startProbe()`, `confirm(token)`, `setChannelSender(fn)`, `noteToolCall({name, cursor?})`, `mode()`, `listening()`, `stats()`. 이벤트 `listening-changed`, `mode-changed`.
+- **공개 진입점**: `createInbox({limits, now, timers, log, cursorBase?})` → `push(event)`, `discardAll()`, `wait({cursor, timeoutMs, signal})`, `startProbe()`, `confirm(token)`, `setChannelSender(fn)`, `noteToolCall({name, cursor?})`, `mode()`, `listening()`, `pauseListening()`, `paused()`, `stats()`. 이벤트 `listening-changed`, `mode-changed`, `handed`(처음 내준 사건. `room-session` 이 읽음 확인을 돌려줄 때 쓴다).
+  - 사건마다 `received_at`(수신함에 넣은 시각)을 붙인다. poll 모드에서 사건을 꺼내지 않는 tool 호출의 `noteToolCall` 은 내주지 않은 사건이 있으면 `unread{count, oldest_ts, oldest_age_sec}` 를 돌려준다. `pauseListening()`(`set_status{listening: false}`)은 다음 `wait` 까지 `listening` 을 거짓으로 둔다. channel 모드의 수신 불명 판정에는 쓰지 않는다(개선안 P2·P4, 2026-11-16).
 - **계약 원본**: 사건 봉투 타입(`InboxEvent`: `kind`, `id`, `from`, `to`, `ts`, `text`, `change`, `data`)은 `inbox/contract.ts` 가 소유한다. `room-session` 과 `mcp-server` 가 이 타입을 쓴다.
 - **불변조건**:
   - 사건은 자동으로는 한 경로로 한 번만 나간다. 취소된 `wait` 은 커서를 옮기지 않는다. 확인 전에는 채널로 사건을 보내지 않는다.
@@ -273,7 +283,7 @@ flowchart TD
 ### 3.10 `room-session`
 
 - **책임 / 비책임**: 방 참가 한 번의 조율자다. 입장 절차, mesh 보정(누구에게 접촉할지), P2P 프레임 해석(`hello`, `state`, `sync_end`, `chat`, `ack`, `bye`), 채팅 전송과 `ack` 대기, 참가자 표시 계산, 도메인 변화를 수신함 사건으로 바꾸기, 종료를 맡는다. 병합 규칙(`shared-state`), 연결 방법(`mesh`), 전달 경로(`inbox`)는 각 소유자에게 맡긴다.
-- **공개 진입점**: `createRoomSession(deps)` → `create(args)`, `join(args)`, `leave()`, `sendChat(args)`, `command(stateCommand)`, `status()`, `writeReport()`, `shutdown(budgetMs)`.
+- **공개 진입점**: `createRoomSession(deps)` → `create(args)`, `join(args)`, `observe(args)`(관전 입장. 아래 관전 모드), `leave()`, `sendChat(args)`, `command(stateCommand)`, `status()`, `observed()`, `writeReport()`, `shutdown(budgetMs)`.
 - **입력 / 결과**: 모든 함수는 `{ok, …}` 결과를 돌려준다. 결과 코드는 `room-session/contract.ts` 가 소유한다. `mcp-server` 가 그것을 [tool 오류](mcp-interface.md#2-공통-규칙)로 옮긴다.
 - **불변조건**:
   - 방에 있지 않으면 `create`/`join` 외에는 `NOT_IN_ROOM`.
@@ -283,7 +293,8 @@ flowchart TD
   - 필수 목록에서 빼는 것은 `attempt-failed{signaling, peer_gone}` 과 상대의 `bye{leave|shutdown}` 뿐이다. 그 밖의 `attempt-failed` 는 실패로 싣고 연속 실패로 센다(`RELAY_NOT_ALLOWED` 로 끝난 `ice` / `failed` 포함).
   - 입장 기한(`JOIN_MESH_TIMEOUT_MS`)에 아직 시도 중인 필수 피어는 `mesh.expireAttempt(peer)` 로 끝내고, 그때 나온 `attempt-failed` 의 단계와 사유를 오류에 싣는다. 열렸지만 동기화가 끝나지 않은 피어는 `session` 단계다.
   - **`join` 을 보내기 전에 mesh 와 시그널 처리기가 붙어 있다.** `joined` 전에는 받기만 한다. mesh 가 내보내려는 시그널은 `joined` 를 받을 때까지 들고 있다가 보낸다(mesh 에 주는 전송 함수가 이 일을 한다. mesh 는 모른다).
-  - `presence` 를 `listening` 때문에 다시 쓰는 것은 5초에 한 번을 넘지 않는다(`PRESENCE_MIN_INTERVAL_MS`). 그 사이의 변화는 마지막 값만 쓴다.
+  - `presence` 를 `listening` 때문에 다시 쓰는 것은 5초에 한 번을 넘지 않는다(`PRESENCE_MIN_INTERVAL_MS`). 그 사이의 변화는 마지막 값만 쓴다. 예외는 `set_status{listening: false}` 다. 그때의 값을 바로 쓴다.
+  - 다른 참가자의 `presence.listening` 이 참→거짓이 되면 `peer` / `stopped_listening`(`data.since`), 그 뒤 다시 참이 되면 `peer` / `listening` 을 낸다. 거짓이 된 시각을 적어 두고 `sendChat` 결과의 `not_listening` 에 싣는다. 점검(`ping`)은 `rr` 을 단 대상 지정 글을 보내고 `ack{read}` 를 기다린다. 받은 쪽은 `inbox` 의 `handed` 로 읽음 확인을 돌려준다(개선안 P1·P4·P6, 2026-11-16).
   - **재동기화는 멈추지 않는다.** 진전이 없으면 간격만 늘린다. `mergeRemote` 의 `changes` 에 "테스트 중단됨"이 있으면, 그 기록을 받은 링크를 뺀 열린 모든 링크에서 간격과 무관하게 스냅샷 교환을 시작한다([protocol.md 5.4](protocol.md#54-동기화-절차)).
   - 답(`sf` 가 있는 `sync_end`)에는 답하지 않는다.
   - **경과 시간을 스스로 계산하지 않는다.** 보내는 `sync_end` 에는 현재 테스트의 `test_id` 와 `shared-state.testElapsed(now)` 의 값을 싣는다. `null` 이면 둘 다 뺀다. 받은 `sync_end` 에 `test_id` 와 `test_elapsed_ms` 가 있으면 매번 `adoptElapsed` 에 그대로 넘긴다. 첫 동기화, 재동기화, 시작, 답을 가리지 않는다. 받은 값을 자기 값에 더하거나 견주지 않는다([protocol.md 5.5](protocol.md#55-파생-판정)).
@@ -323,6 +334,26 @@ flowchart TD
   - **시그널 전송 함수를 다루는 파일은 `room-session/signal-gate.ts` 하나다**("입장·보정"에 든다). `joined` 전 보관, `signaling-client.sendSignal` 호출, 그 함수를 넣어 `createMesh` 를 부르는 일을 이 파일에 둔다. 다른 파일은 `sendSignal` 이라는 이름을 쓰지 않는다. 채팅 전달을 포함한 다른 부분이 시그널에 글을 실을 길이 없다는 것을 `V-U8` 이 파일 단위로 본다.
   - "채팅 전달"과 "참가자 표시"는 하위 모듈 없이 단독으로 시험한다. 가짜 하위 모듈 다섯 개를 세우는 시험은 "입장·보정"과 "P2P 세션"에만 필요하다.
   - "기다리는 동안 다른 곳에서 기록이 들어왔는지"는 `applyLocal` 과 `mergeRemote` 의 결과로 안다. 복제본을 바꾸는 호출은 `room-session` 만 하기 때문이다. `shared-state` 에 진입점을 더하지 않는다.
+- **관전 모드와 관전자 처리** **[사용자 요청 2026-11-16. 구현 2026-11-16. 규칙은 [protocol.md 4.6](protocol.md#46-관전자)]**. 관전 전용 세션을 따로 두지 않고 **이 모듈에 관전 모드를 둔다.** 입장 판정, mesh 보정, `hello`·스냅샷 교환·재동기화, 채팅 수신과 `ack`, 사건 변환, 종료가 참가자와 똑같아서, 따로 두면 그 전부를 베끼게 된다. 다른 것은 "쓰지 않는다"와 "표시를 단다"뿐이다.
+  - **계약에 더하는 것**(`room-session/contract.ts`):
+    - `RoomSession.observe(args: ObserveRoomArgs): Promise<SessionResult<RoomObserved>>`. `ObserveRoomArgs = { room_id, server?, name?, signal? }`. 시그널링 `join(mode=join)` 으로 들어가 `join` 과 같은 입장 판정을 한다. 결과 코드도 `join` 과 같다(`INVALID_ARGUMENT`, `ALREADY_IN_ROOM`, `ICE_CONFIG_REJECTED`, `NATIVE_LOAD_FAILED`, `SERVER_UNREACHABLE`, `SIGNALING_ERROR`, `DIRECT_CONNECT_FAILED`, `PEER_VERSION_MISMATCH`, `CANCELLED`). 새 결과 코드는 없다.
+    - `RoomSession.observed(): SessionResult<RoomObserved>`. 방에 있으면(관전이든 참가든) 지금 복제본과 링크로 만든 요약. 없으면 `NOT_IN_ROOM`.
+    - `RoomObserved = { server, name, signaling, participants: ParticipantView[], observers: ObserverView[], unaware: string[], test: TestStatus | null, scenarios: ObservedScenario[], claims: ObservedClaim[] }`. **`room_id` 는 싣지 않는다**(출력 쪽이 방 ID 를 실수로 찍지 못하게 타입에서 뺀다). `unaware` 는 `hello.observer` 가 없는 참가자(관전자를 모르는 구버전)다. `ObservedScenario = { scenario_id, index, title, by, plan, actor, verifier, over_limit, wall(ISO) }`(한도 초과 포함 전부). `ObservedClaim = { claim_id, scenario_id, by, outcome, action, expected, observed, steps, status, late, wall(ISO), verifications: [{ by, result, evidence, counted, wall(ISO) }] }`(전부). 값은 `shared-state` 의 view 를 이름만 바꿔 옮긴다(`views.ts` 의 `observedScenarios`, `observedClaims`).
+    - `ObserverView = { name, link: LinkStatus, since: string }`. `SessionStatus` 에 `observers: readonly ObserverView[]` 를 더한다(참가자 모드의 `get_status` 에도 실린다). `RoomEntered` 에도 `observers` 를 더한다(`join` 은 입장한 때 이미 지켜보던 관전자, `create` 는 빈 목록. `join_room`·`create_room` 결과에 실린다).
+  - **관전 모드에서 다른 것** (`RoomParams.role: 'participant' | 'observer'`. 세션이 `observe` 일 때만 `observer`):
+    - 자기 `presence` 를 쓰지 않는다. 입장 뒤, `leave`, `shutdown` 의 `presence{left}` 도 쓰지 않는다. `inbox` 의 `listening-changed`·`mode-changed` 를 구독하지 않는다.
+    - 사건 변환(`events.ts`)의 기한 타이머가 없다(`EventSinkDeps.onDeadline` 이 `null`). `stop{time_limit}` 을 쓰지 않는다.
+    - 기록 파일을 열지 않는다(`openTranscript` 를 부르지 않는다). 콘솔 출력이 목적이고, 채팅 본문을 그 PC 의 디스크에 남기지 않는다. 그래서 `record_failed` 도 나지 않는다.
+    - `sendChat`, `command`, `writeReport` 는 `NOT_IN_ROOM`(detail `observing read-only`)이다. 관전자는 참가자로 방에 있는 것이 아니다. 새 결과 코드를 만들지 않으므로 `mcp-server` 의 코드 표가 바뀌지 않는다.
+    - `hello` 에 `observer: true` 를 싣는다(P2P 세션의 `self.observer`).
+    - 사건 변환의 대상(`EventSinkDeps.audience: 'participant' | 'observer'`): `observer` 면 다른 참가자의 `presence.status` 변화마다 `peer` / `status` 사건을 더 낸다(참가자 모드는 `ready` 만). `hello.observer` 가 없는 상대마다 한 번 `system` / `observer_unaware`(`data.peer`)를 낸다. 그 밖은 참가자 모드와 같다(입장 중 스냅샷으로 받은 상태는 사건으로 만들지 않는다. 입장 결과 `RoomObserved` 가 싣는다).
+  - **두 모드 공통: 관전자 링크의 처리** ([protocol.md 4.6](protocol.md#46-관전자)의 "받는 쪽의 처리"):
+    - P2P 세션(`p2p-session.ts`)이 `hello.observer` 를 링크 상태에 둔다. `LinkView.observer: boolean | null`(`null` 은 필드 없음 = 구버전). 훅 `P2PHooks.greeted(peer, sid, observer)` 를 `hello` 를 받아들일 때 부른다.
+    - 관전자 링크의 `chat` 도 `hooks.chat` 으로 넘긴다(관전자 표시를 함께. 수신함 사건의 `data.observer`). 관전 모드의 `sendChat` 도 보낸다(사람이 관전 콘솔에서 쓴 지시. 2026-11-16). 변경 `state` 는 병합하지 않고 `countBad(link, 'observer_write')`. 스냅샷은 `author` 가 그 관전자인 기록을 빼고 `mergeRemote` 에 넘긴다(뺀 수는 `state.merge` 의 `ignored` 에 더한다).
+    - 관전자 목록은 새 파일 `room-session/observers.ts`(`createObserverBook`)가 갖는다. `greeted` 로 넣고(이름 → `{sid, since}`. 같은 sid 면 `since` 를 그대로 둔다), `observer: false`(또는 필드 없음)로 같은 이름이 오면 빼고, `bye{leave|shutdown}` 로 목록(`list`)에서 빼고, `list(linkOf, members)` 로 `ObserverView[]` 를 만든다. bye 로 끝낸 관전자의 이름은 "끝낸 관전자"로 남겨 `participants()`·`reachOf()` 에서 계속 뺀다. 서버 목록이 갱신되기 전까지 그 이름이 `shown_as: left` 참가자로 보이지 않게 하려는 것이다. 순수한 표라 단독으로 시험한다.
+    - `participants()`, `reachOf()`, `warningsOf()`, `notice()` 는 그 목록의 이름을 뺀다. 채팅의 `known`(대상으로 줄 수 있는 이름)에는 넣는다. 채팅의 수신자 고르기(`open`, `absent`)는 바꾸지 않는다(방 전체 글은 관전자에게도 간다).
+    - 관전자 링크가 동기화되면 `peer` / `observer_joined`, 동기화까지 열렸던 관전자 링크가 닫히면 `peer` / `observer_left`(`data.reason`)를 낸다(한 쌍으로 나온다). 그 링크의 `disconnected`·`left`·`reconnected`·`unreachable` 사건은 내지 않는다. hello 전에 닫힌 링크는 관전자 목록에 있는 이름이면 관전자 링크로 본다. 기록 파일의 `peer` 줄에는 `change` 를 `observer_joined`·`observer_left` 로 남긴다. 입장 중에 생긴 것은 다른 사건처럼 수신함에 넣지 않는다(입장 결과의 `observers` 가 싣는다).
+    - 입장 판정(필수 피어)은 바꾸지 않는다. 서버 목록에는 관전 표시가 없기 때문이다(protocol.md 4.6 의 한계).
 - **의존**: `signaling-client`, `mesh`, `shared-state`, `inbox`, `records` 의 공개 계약.
 - **실패**: 하위 모듈의 실패를 결과 코드로 바꾼다. 부분 성공(일부 수신자만 전달)은 수신자별 결과로 그대로 보고한다.
 - **수명 / 동시성**: `shutdown` 은 예산 안에 `bye` 전송 → `leave` → 링크 정리 순으로 하고, 예산을 넘기면 남은 단계를 건너뛴다.
@@ -331,7 +362,8 @@ flowchart TD
 ### 3.11 `mcp-server`
 
 - **책임 / 비책임**: MCP 초기화 응답(capability, instructions), tool 등록과 입력 검증, 결과 직렬화, 채널 알림 전송, stdio 수명 처리, **환경 변수 해석**, 채널 확인 기록 파일 쓰기. 방 로직을 갖지 않는다.
-- **공개 진입점**: `loadConfig(env)` → `{config, problems}`. `startMcpServer({session, inbox, config, problems, log})` → `{ closed: Promise }`.
+- **공개 진입점**: `loadConfig(env)` → `{config, problems}`. `startMcpServer({session, inbox, config, problems, log, monitorLauncher})` → `{ closed: Promise }`.
+  - `monitorLauncher: { kind: 'sh' | 'node'; path: string }` 는 `entry/mcp` 가 패키지 뿌리로 만든다(`win32` 면 `node` 와 `dist/entry/monitor.js`, 그 밖은 `sh` 와 `scripts/monitor.sh`). `mcp-server` 의 순수 함수 `monitorCommand(launcher, roomId, serverKey)` 가 `create_room` 결과의 `monitor_command` 와 `get_status` 의 `room.monitor_command` 를 만든다(형식은 [mcp-interface.md 3.4](mcp-interface.md#34-get_status)). `get_status` 는 세션의 `observers` 를 그대로 싣는다. 관전 기능 때문에 `mcp-server` 가 `monitor` 를 import 하지는 않는다.
 - **계약 원본**: [mcp-interface.md](mcp-interface.md).
 - **입력 / 결과**: `loadConfig` 는 실패하지 않는다. 잘못된 값은 기본값으로 바꾸고 `problems` 에 이름과 이유를 담는다. ICE 서버 값은 바꾸지 않고 원문과 검증 결과를 함께 넘긴다([5절](#5-설정-항목과-기본값)). `AGENT_CHAT_CLIENT` 는 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` 만 받는다.
   - tool 핸들러에서 예상 못 한 예외가 나면 `INTERNAL_ERROR` 와 고정 글만 JSON 으로 돌려준다. SDK 의 기본 처리에 맡기면 JSON 이 아닌 결과에 예외 글이 그대로 실리고, 거기에 피어 입력이 섞일 수 있다. 이 코드는 `mcp-server/contract.ts` 의 `ToolErrorCode` 가 `room-session` 의 결과 코드에 더한 유일한 값이다.
@@ -346,7 +378,7 @@ flowchart TD
 ### 3.12 `diagnostics`
 
 - **책임 / 비책임**: 진단 사건을 JSONL 로 쓰고, 허용 필드만 통과시키고, 7일 지난 로그를 지운다([6절](#6-로깅-설계)). 대화 기록은 다루지 않는다.
-- **공개 진입점**: 타입 `LogPort { event(level, module, event, fields) }` 와 서버용 `ServerLogPort`(`peer` 필드를 받지 않는다). `createFileLogger({dir, service, level, now, timers})`, `createStdoutLogger({service, level, now})`. 둘 다 `LogPort & { proc, close(budgetMs) }` 를 돌려준다. 포트 타입은 `diagnostics/log-port.ts`(모든 모듈이 쓴다), 생성 함수의 타입은 `diagnostics/contract.ts`(조립만 쓴다)에 있다.
+- **공개 진입점**: 타입 `LogPort { event(level, module, event, fields) }` 와 서버용 `ServerLogPort`(`peer` 필드를 받지 않는다). `createFileLogger({dir, service, level, now, timers, stderrCopy?})`, `createStdoutLogger({service, level, now})`. `LogService` 에 `monitor` 를 더한다(`peer` 는 `mcp`·`cli` 처럼 남긴다). `stderrCopy`(기본 `true`)가 `false` 면 `warn` 이상을 stderr 에 베끼지 않는다. 관전 도구가 쓴다. 그 콘솔은 사람이 읽는 출력이라 JSON 로그 줄이 섞이면 안 된다(문제는 관전 출력이 따로 알린다). 둘 다 `LogPort & { proc, close(budgetMs) }` 를 돌려준다. 포트 타입은 `diagnostics/log-port.ts`(모든 모듈이 쓴다), 생성 함수의 타입은 `diagnostics/contract.ts`(조립만 쓴다)에 있다.
 - **입력 / 결과**: `level` 보다 낮은 사건은 쓰지 않는다. MCP 프로세스에서는 `loadConfig` 가 준 `logLevel`(`AGENT_CHAT_LOG_LEVEL`)을 조립이 넘긴다. `close(budgetMs)` 는 버퍼에 남은 줄을 예산 안에서 쓰고 타이머를 지운다. 예산을 넘기면 남은 줄을 버린다. reject 하지 않는다([S13](#s13-mcp-프로세스-종료) 4번).
 - **불변조건**: 허용 목록에 없는 필드는 출력되지 않는다. 로거가 스스로 붙이는 `dropped`·`failed` 는 예외다([6.2](#62-필드-규칙)). `svc` 가 `server`·`lambda` 인 로거는 `peer` 필드도 출력하지 않는다. MCP 와 CLI 조립은 파일 로거만 만든다. stdout 로거를 MCP 프로세스에서 만들면 stdout 에 쓰게 되는데, 이것은 타입으로 막히지 않는다(조립의 규칙이다). 로그 실패가 호출자를 멈추지 않는다. 로거가 자기 실패를 다시 로그로 쓰지 않는다. 파일 로거는 프로세스마다 다른 파일에 쓴다. 전역 시계와 타이머를 직접 부르지 않는다.
 - **검증**: 단위 테스트 `V-U6`.
@@ -354,7 +386,8 @@ flowchart TD
 ### 3.13 `setup`
 
 - **책임 / 비책임**: 에이전트 호스트에 MCP 서버를 등록하고, Channels 가능 여부를 가능/불가/불명으로 보고하고, 연결 점검(`doctor`)을 한다. **권한 설정을 바꾸지 않는다.** 필요한 승인과 재시작은 문장으로 안내만 한다.
-- **공개 진입점**: 셸 `sh installer/install.sh [--install|--uninstall|-u]`(Claude Code 와 Codex 통합), `sh installer/claude.sh`, `sh installer/codex.sh`(호스트별. 인자는 같다). Node `node scripts/install.mjs [--client claude|codex|all] [--remove] [--in-place]`(설치 본체. 의존성 없이 돈다. 셸 진입점이 부르고, `sh` 가 없는 곳에서는 직접 실행한다). CLI `agent-chat setup [--client claude|codex|all] [--remove]`, `agent-chat doctor [--server <주소>]`.
+- **공개 진입점**: 셸 `sh installer/install.sh [--install|--uninstall|-u]`(Claude Code·Codex·Gemini CLI 통합), `sh installer/claude.sh`, `sh installer/codex.sh`, `sh installer/gemini.sh`(호스트별. 인자는 같다), `sh installer/uninstall.sh [--client …] [--purge]`(Stop hook 끄기, 등록 제거, 선택적으로 기록 삭제). Node `node scripts/install.mjs [--client claude|codex|gemini|all] [--remove]`(설치 본체. 의존성 없이 돈다. 셸 진입점이 부르고, `sh` 가 없는 곳에서는 직접 실행한다). CLI `agent-chat setup [--client claude|codex|gemini|all] [--remove]`, `agent-chat doctor [--server <주소>]`, `agent-chat stop-hook on|off|status`.
+  - **Gemini CLI**(2026-11-16): `mcp get` 이 없어 등록을 설정 파일(`~/.gemini/settings.json`, 작업 폴더의 `.gemini/settings.json`)로 읽는다(`setup/gemini-config.ts`). 등록·제거는 CLI 로 한다(`mcp add --scope user -e K=V agent-chat <node> <mcp.js>`, `mcp remove --scope user agent-chat`. `--` 를 쓰면 Gemini CLI 가 거절한다). 허용 하위 명령은 `--version`, `mcp add`·`remove`·`list` 다.
 - **의존**: `protocol`(주소 정규화, 확인 기록 파일 스키마), `diagnostics`, `@modelcontextprotocol/sdk` 의 **클라이언트**(`doctor` 가 등록된 서버를 띄워 tool 을 부른다), `node:child_process`(호스트 CLI 실행. **`setup/host-cli.ts` 한 파일에만 둔다.** 실행하는 하위 명령은 `--version`, `mcp get`·`add`·`remove`·`list`, `auth status` 뿐이고, 그 파일의 단위 시험 `host-cli.test.ts` 가 이 목록을 고정한다. 에이전트 호스트를 다른 권한으로 띄우는 실행 옵션은 문자열로도 두지 않는다. `src/setup` 뿐 아니라 `scripts/install.mjs` 와 `installer/*.sh` 에도 두지 않는다). SDK 의 클라이언트 stdio 전송(`client/stdio.js`. 프로세스를 띄운다)은 **`setup/mcp-process.ts` 한 파일에만 둔다.** 이 파일은 등록된 명령과 환경 그대로 MCP 프로세스를 띄우는 일만 하고, 그 파일의 단위 시험 `mcp-process.test.ts` 가 "등록에서 읽은 명령·인자·환경만 넘긴다"를 고정한다. SDK 의 네트워크 전송(HTTP, SSE, WebSocket)은 쓰지 않는다. 시각과 타이머는 `entry/cli` 가 넘긴다. `ws` 와 `node-datachannel` 을 직접 쓰지 않는다. Node 의 네트워크 내장 모듈도 쓰지 않는다. 연결 점검은 등록된 MCP 프로세스를 거쳐서 한다. 제품 경로를 그대로 지나게 하려는 것이다.
 - **실패**: 단계별 결과를 `통과 / 실패 / 건너뜀 / 사용자 조치 필요` 로 출력한다.
 - **검증**: `V-L10`(가짜 호스트 CLI. 셸 진입점 시험 `installer/*.test.mjs` 포함), `V-S1`·`V-S2`(이 PC 의 실제 설치), `V-I1`(에이전트 주도 설치).
@@ -386,25 +419,23 @@ flowchart TD
 | `AGENT_CHAT_CLAUDE_BIN` | `claude` | Claude Code CLI 실행 파일 | `setup`(`doctor` 포함) |
 | `AGENT_CHAT_CODEX_BIN` | `codex` | Codex CLI 실행 파일 | `setup`(`doctor` 포함) |
 | `AGENT_CHAT_SERVER` | 없음 → 공용 서버 | `doctor` 가 쓸 서버 주소. `--server` 를 주면 그것이 먼저다 | `doctor` |
-| `AGENT_CHAT_IN_PLACE` | 없음 | `1` 이면 `--in-place` 와 같다 | `install.mjs` |
 | `CODEX_HOME` | `~/.codex` | Codex 설정 파일(`config.toml`)의 위치. Codex 자신의 변수이고 설치는 따라 읽기만 한다 | `setup` |
 
 - MCP 등록에 넣는 환경 변수의 목록(아래 설치 단계)은 이 표 때문에 바뀌지 않는다. 예외는 `AGENT_CHAT_HOME` 하나다. 기본값이 아니면 등록에도 넣는다(아래 설치 단계). `doctor` 는 `AGENT_CHAT_SERVER` 를 등록에 넣지 않고 `create_room` 의 `server` 인자로 준다. 등록된 명령과 환경을 그대로 띄운다는 점은 같다.
 - `AGENT_CHAT_CLAUDE_BIN`, `AGENT_CHAT_CODEX_BIN` 은 `setup` 이 호스트 CLI 를 실행하는 모든 곳(찾기, 등록, 확인, 제거, Channels 판정, `doctor` D2)에 쓰인다. 아래 표와 문장의 `claude …`, `codex …` 는 이 실행 파일로 하는 호출이다. CLI 가 `PATH` 밖에 있을 때 쓰고, 시험이 가짜 CLI 를 넣는 자리이기도 하다. 제품 코드에 시험용 분기를 두지 않는다.
 - 이 두 값을 줬는데 그 파일을 실행할 수 없으면 "없는 호스트"로 건너뛰지 않고 **실패**다. 잘못 준 설정을 조용히 넘기지 않는다 **[제안]**.
 
-**설치 위치.** 저장소는 `<AGENT_CHAT_HOME>/app`(기본 `~/.agent-chat/app`)에 받는다. MCP 등록이 절대 경로를 쓰므로, 임시 폴더나 다른 프로젝트 안에 받으면 폴더가 지워질 때 서버가 뜨지 않는다.
+**설치 위치 [사용자 결정 2026-11-16].** 저장소를 받은 자리에서 그대로 설치한다. `install.mjs` 는 자기가 든 패키지 뿌리를 등록하고, 그 경로가 `<AGENT_CHAT_HOME>/app` 이 아니면 "이 자리의 저장소를 등록한다"와 "폴더를 옮기거나 지우면 설치기를 다시 실행한다"를 출력한 뒤 계속한다. 예전에는 다른 위치에서 실패했으나, 사용자가 받은 저장소에서 `installer/install.sh` 를 바로 실행해 설치하기를 원해 바꿨다. 예전 옵션 `--in-place` 는 받아들이되 뜻이 없다. `AGENT_CHAT_IN_PLACE` 는 없앴다.
 
-- 저장소 README 의 첫 명령이 `git clone <저장소 주소> ~/.agent-chat/app && sh ~/.agent-chat/app/installer/install.sh` 다.
-- 다른 위치에서 실행하면 등록하지 않고 "실패: 설치 위치가 아니다"와 위 명령을 출력한다. 개발용으로 그 자리의 저장소를 등록하려면 `AGENT_CHAT_IN_PLACE=1` 을 준다. `install.mjs` 를 직접 실행할 때는 `--in-place` 도 같다(폴더를 옮기거나 지우면 등록이 깨진다고 경고한다).
-- `install.mjs` 는 자기가 든 패키지 뿌리(`package.json` 이 있는 폴더)가 그 위치인지만 본다. git 저장소인지는 보지 않는다. 그래서 커밋하지 않은 작업 트리를 그 위치에 복사해도 설치된다([`V-S1`](verification-plan.md#34-실제-설치-모델-호출-없음)이 이렇게 한다).
+- README 의 첫 명령은 여전히 `git clone <저장소 주소> ~/.agent-chat/app && sh ~/.agent-chat/app/installer/install.sh` 다(오래 둘 곳의 예).
+- `install.mjs` 는 git 저장소인지 보지 않는다. 커밋하지 않은 작업 트리도 설치된다.
 
 **설치 단계** (셸 진입점이 Node 를 찾아 `install.mjs` 를 실행한다. `install.mjs` 가 1~4, 이어서 `agent-chat setup` 이 5~11 을 한다. 10단계에서 `setup` 이 `doctor` 의 점검을 부른다. 종료 코드 0·1·2 를 한곳에서 정하려는 것이다. `agent-chat doctor` 를 따로 실행하면 점검만 한다)
 
 | # | 단계 | 동작 | 결과 |
 |---|---|---|---|
 | 1 | Node 버전 | `process.versions.node` 가 22 이상인지 본다. 셸 진입점이 이미 본 것을, 직접 실행에 대비해 다시 본다 | 미만이면 **실패**. 아무 것도 바꾸지 않고 끝난다 |
-| 2 | 설치 위치 | `install.mjs` 가 든 패키지 뿌리가 `<AGENT_CHAT_HOME>/app` 인지 본다 | 아니면 **실패**(`--in-place` 또는 `AGENT_CHAT_IN_PLACE=1` 이면 경고 뒤 계속) |
+| 2 | 설치 위치 | `install.mjs` 가 든 패키지 뿌리를 등록 대상으로 정한다 | 늘 **통과**. `<AGENT_CHAT_HOME>/app` 이 아니면 그 자리를 등록한다는 안내를 출력한다 |
 | 3 | 의존성과 빌드 | `npm ci` → `npm run build` | 실패하면 **실패** |
 | 4 | 네이티브 모듈 | 새 프로세스에서 `node-datachannel` 을 불러 본다 | 실패하면 **실패**. OS 와 CPU 종류를 함께 출력한다 |
 | 5 | 호스트 찾기 | `claude --version`, `codex --version`. `--client` 로 고른 호스트만 본다 | 없는 호스트는 **건너뜀**. 고른 호스트가 하나도 없으면 수동 등록 명령을 출력하고 종료 코드 2 |
@@ -531,10 +562,114 @@ flowchart TD
 | Windows **[미실행]** | `sh` 가 없어 `installer/*.sh` 를 쓸 수 없다. `node scripts/install.mjs` 를 직접 실행한다. `npm`, `claude`, `codex` 가 `.cmd` 라 셸 없이 실행하면 실패할 수 있다. 파일 권한 비트(0600)가 뜻이 없다. 종료 신호가 다르다. 관리형 설정 경로가 다르다 |
 | Linux **[미실행]** | 프리빌트의 libc 종류에 따라 로드가 실패할 수 있다 |
 
+### 3.14 `monitor`
+
+**[사용자 요청 2026-11-16 "에이전트들의 대화를 모니터링할 수 있는 방법을 추가해서 콘솔에서 스크립트로 접속해서 모니터링할 수 있게". 구현 2026-11-16. 실행 기록은 [2026-11-16-monitor](../../tests/test-history/2026-11-16-monitor.md)]**
+
+- **책임 / 비책임**: 사람이 콘솔에서 방에 관전자로 들어가([protocol.md 4.6](protocol.md#46-관전자)) 방에서 오가는 것을 실시간으로 보게 한다. 인자 해석, `room-session.observe` 호출, 처음 상태 요약 출력, 사건을 한 줄씩 출력(사람용, `--json` 이면 JSON Lines), 종료. 연결·동기화·사건 만들기는 `room-session` 이 한다. **쓰지 않는다**: 채팅을 보내지 않고, 공유 상태에 기록을 쓰지 않고, 로컬 기록 파일과 보고서를 만들지 않는다. 출력은 사람에게 보여 주는 것이라 본문이 나온다(진단 로그가 아니다).
+- **공개 진입점**
+  - 셸: `sh scripts/monitor.sh <room_id> [서버] [옵션…]`. 설치 스크립트가 아니므로 `installer/` 가 아니라 `scripts/` 에 둔다. Node 22 이상을 찾고(`AGENT_CHAT_NODE`, 없으면 `PATH` 의 `node`. 찾는 규칙은 `installer/install.sh` 와 같다. 없거나 22 미만이면 안내와 종료 코드 2), `dist/entry/monitor.js` 가 없으면 "먼저 `sh installer/install.sh` 또는 `npm ci && npm run build`"를 출력하고 종료 코드 2, 있으면 **`exec`** 로 넘긴다(Ctrl-C 가 Node 에 바로 가고 셸이 남지 않게). 패키지 뿌리는 스크립트의 위치로 구한다(공백이 든 경로도 된다. `V-L13` 이 공백과 작은따옴표가 든 경로에서 돌린다).
+  - CLI: `agent-chat monitor <room_id> [서버] [옵션…]`(`dist/entry/cli.js` 의 하위 명령. 첫 인자가 `monitor` 면 설치용 로거를 만들기 전에 `entry/monitor` 를 동적 import 해 `main(argv)` 로 넘긴다). `node dist/entry/monitor.js …` 와 `bin` 의 `agent-chat-monitor` 도 같은 인자다. `entry/monitor` 는 자기가 직접 실행됐을 때만(`process.argv[1]` 의 실경로가 자기 파일) 스스로 `main` 을 부른다.
+  - 모듈(`src/monitor/index.ts`): `parseMonitorArgs(argv, env, stdoutIsTty, {homeDir?, randomBytes?})`, `formatSnapshot(observed, style, at)`, `formatEvent(event, style, book)`, `formatNotice(text, at, style)`, `toTerminalText(text)`, `jsonLine(value)`, `createMonitorSink({ write, style, json, now, refresh? })`, `runMonitor(deps)`. 계약 타입은 `src/monitor/contract.ts`(`MonitorOptions`, `ParsedMonitorArgs`, `MonitorStyle`, `MonitorBook`, `MonitorSink`, `MonitorDeps`, `MonitorHandle`, `MonitorExitCode`, `MonitorEndReason`).
+
+**인자**
+
+| 인자 | 기본값 | 뜻 |
+|---|---|---|
+| `<room_id>` 또는 `--room <room_id>` | 필수 | 지켜볼 방. 형식은 `room_id` 와 같다. 둘 다 주면 인자 오류. 위치 인자는 늘 `<room_id> [서버]` 순서라 `--room` 을 쓰면 서버는 `--server` 로 준다 |
+| `[서버]` 또는 `--server <주소>` | `AGENT_CHAT_SERVER`, 없으면 공용 서버 `agent-chat.tools.camp` | [서버 주소 정규화](protocol.md#6-서버-주소-정규화)를 그대로 쓴다. 잘못된 `AGENT_CHAT_SERVER` 를 공용 서버로 바꾸지 않는다(인자 오류) |
+| `--name <이름>` | `observer-<무작위 4자>` | 관전자 이름. 참가자 이름 규칙(예약 이름 금지). `NAME_IN_USE` 면 다른 이름을 주라고 안내한다 |
+| `--json` | 꺼짐 | stdout 에 JSON Lines 만 쓴다. 사람용 안내는 stderr 로 간다 |
+| `--no-color` | 꺼짐 | 색을 끈다 |
+| `-h`, `--help` | | 사용법을 stdout 에 쓰고 종료 코드 0 |
+
+- 환경 변수(모두 선택): `AGENT_CHAT_SERVER`, `AGENT_CHAT_ICE_SERVERS`(MCP 와 같은 검증. `turn:` 등이 있으면 접속하지 않고 종료 코드 2), `AGENT_CHAT_HOME`(진단 로그 위치), `AGENT_CHAT_LOG_LEVEL`, `NO_COLOR`(비어 있지 않으면 색을 끈다). 해석은 `parseMonitorArgs` 한 곳이 한다. `entry/monitor` 는 `process.env` 를 통째로 넘긴다.
+- 색은 **stdout 이 TTY 이고**, `--json`·`--no-color`·`NO_COLOR` 가 없을 때만 쓴다.
+
+**출력 형식 — 사람용** (한 사건 한 줄. `시각  종류  보낸이  내용`. 시각은 이 PC 의 지역 시각 `HH:MM:SS` 이고 사건의 `ts` 에서 만든다. 채팅의 `ts` 는 작성자의 벽시계다)
+
+```text
+agent-chat monitor: 방에 들어가는 중… (최대 약 40초)                       ← stderr
+agent-chat monitor: 관전자 observer-4k2q 로 들어왔다. 서버 wss://agent-chat.tools.camp. 읽기 전용이다. 끝내려면 Ctrl-C.
+== 지금 방 상태 (14:01:02) ==
+참가자 3명
+  claude-a     claude-code  역할=강사        상태=ready    링크=open  표시=ready
+  codex-b      codex        역할=수강생 A    상태=working  링크=open  표시=working
+  claude-c     claude-code  역할=-           상태=joined   링크=open  표시=not_ready
+관전자 1명: observer-9zz1
+테스트 a1b2c3d4e5f6-3  시작=claude-a  제한=60분·시나리오 20개  남은=41분  시나리오=2/20  중단=아니오
+  요청: 강의실 손들기 기능을 함께 검증해 줘
+시나리오 2건
+  #1 입장 확인        시작=claude-a  행동=codex-b  검증=claude-a
+  #2 손들기           시작=codex-b   행동=codex-b  검증=claude-c
+주장 2건 (확인 1, 반박 0, 미확인 1, 중단 뒤 0)
+  a1b2c3d4e5f6-7  #1  codex-b  pass  확인됨   입장 버튼을 눌렀다
+  a1b2c3d4e5f6-9  #2  codex-b  pass  미확인   손들기 버튼을 눌렀다
+== 여기부터 실시간. 들어오기 전의 채팅과 남끼리 주고받는 대상 지정 채팅은 보이지 않는다 ==
+14:01:10  채팅      codex-b → 전체     강사 화면에서 손들기 표시가 보입니다
+14:01:12  채팅      claude-a → 전체    확인해 볼게요
+                                       │ 두 번째 줄
+14:01:20  채팅      claude-c → 나      (관전자를 지정한 글)
+14:01:30  상태      codex-b            working (역할 수강생 A)
+14:01:40  주장      codex-b            #2 pass  손들기 버튼을 눌렀다 → 내 화면에 손 표시 [a1b2c3d4e5f6-9]
+14:01:55  검증      claude-c           confirmed  주장 a1b2c3d4e5f6-9(codex-b) → 확인됨
+14:02:05  관전입장  observer-77ab
+14:02:10  중단      claude-a           사용자 중단: 그만하자
+14:02:11  끊김      codex-b            링크가 끊겼다 (ping_timeout)
+14:02:20  알림      system             시그널링 재접속 중이다. 열린 링크로 계속 본다
+^C
+agent-chat monitor: 끝냈다. 방에 bye 를 보냈다.                             ← stderr
+```
+
+- 종류 이름: `채팅`, `입장`·`퇴장`·`끊김`·`재연결`·`닿지않음`·`역할`·`준비`·`상태`(peer), `관전입장`·`관전퇴장`, `테스트시작`·`테스트교체`·`중단`(test), `시나리오`·`시나리오초과`, `주장`, `검증`, `알림`(system). 종류 칸은 표시 폭 12(한글 2칸. 가장 긴 `시나리오초과` 가 12칸이고, 다른 이름은 두 칸 이상 띄운다), 보낸이 칸은 18칸(뒤 띄움 포함)으로 맞춘다. 내용 칸은 40칸째에서 시작하고, 여러 줄 본문의 다음 줄은 40칸을 띄우고 `│ ` 로 잇는다. 주장 줄은 `#순번 결과  행동 → 관찰 [claim_id]` 다음 줄에 `기대:`·`절차:` 를 잇는다. 테스트 시작 줄은 제한과 `test_id` 다음 줄에 `요청:` 을 잇는다.
+- 주장·검증 줄의 `#<순번>` 과 주장 작성자는 출력 쪽이 요약과 앞선 사건으로 만든 표(`book`: 시나리오 ID → 순번, 주장 ID → 작성자)에서 찾는다. 모르면 ID 만 쓴다.
+- 중단 줄의 사유 글은 `test` 사건의 `data.detail` 이다([mcp-interface.md 6.1](mcp-interface.md#61-사건-객체-wait_for_messages-confirm_channel-결과)).
+- 처음 요약은 `observe` 의 결과 `RoomObserved` 로 만든다. 순서는 요약(stdout) → "관전자 … 로 들어왔다"(stderr) → "여기부터 실시간" 줄(stdout) → 요약을 다 쓰기 전에 들어온 사건(입장 중의 채팅, `system`) → 실시간 사건이다. 싱크가 그 사건을 들고 있다가 `start()` 에서 쓴다(최대 1000건. 넘치면 버리고 버린 수를 `system` / `inbox_dropped` 모양의 알림 한 줄로 쓴다).
+- 시나리오 사건에는 순번이 없다. 싱크가 모르는 시나리오·주장을 만나면 `refresh`(조립이 `session.observed()` 로 준다)로 표를 다시 채운다.
+- **방 ID 는 출력하지 않는다.** 서버 키와 자기 이름만 쓴다. 화면 공유나 터미널 기록으로 방 ID(접근 수단)가 퍼지지 않게 한다. `RoomObserved` 에 방 ID 가 없다.
+- **터미널 안전(`toTerminalText`).** 본문은 다른 참가자가 쓴 글이다. 사람용 출력에서는 C0 제어 문자(줄바꿈 제외. 탭은 공백 두 칸), DEL, C1, ESC, 양방향 제어(U+202A–U+202E, U+2066–U+2069), U+2028·U+2029 를 `\u{1b}` 처럼 보이는 글자로 바꾼다. 글이 터미널을 조작(색, 커서 이동, 제목 바꾸기, 화면 지우기)하지 못한다. 본문의 줄바꿈은 다음 줄을 `│ ` 로 들여 이어 쓴다. 색은 이 모듈이 넣는 것만 나간다. 본문은 자르지 않는다.
+
+**출력 형식 — `--json`** (JSON Lines. 한 줄이 객체 하나. `type` 으로 가른다)
+
+```text
+{"type":"snapshot","at":"2026-11-16T05:01:02.000Z","server":"wss://agent-chat.tools.camp","name":"observer-4k2q","signaling":"connected","participants":[…ParticipantView],"observers":[…],"unaware":[],"test":{…TestStatus}|null,"scenarios":[…],"claims":[…]}
+{"type":"event","kind":"chat","change":null,"id":"k3x9q0ab12cd-1a","from":"codex-b","to":"room","ts":"2026-11-16T05:01:10.000Z","text":"강사 화면에서 손들기 표시가 보입니다","data":{}}
+{"type":"event","kind":"peer","change":"observer_joined","id":null,"from":"observer-77ab","to":"room","ts":"…","text":"…","data":{}}
+{"type":"notice","at":"…","code":"signaling","state":"reconnecting"}
+{"type":"end","at":"…","reason":"interrupted"}
+```
+
+- `snapshot` 은 `RoomObserved` 에 `type`·`at` 을 더한 것, `event` 는 수신함 사건(`InboxEvent`)에 `type` 을 더한 것이다(필드 이름은 [mcp-interface.md 6.1](mcp-interface.md#61-사건-객체-wait_for_messages-confirm_channel-결과)과 같다. `cursor` 는 없다). `end.reason` 은 `interrupted`(신호) \| `stdout_closed`. `notice` 는 2초 점검의 알림이다: `code` 가 `signaling`(`state` 는 바뀐 시그널링 상태) \| `alone`(연결된 참가자가 없다).
+- 실패는 `{"type":"error","code":"<결과 코드>","detail":"…","details":{…}?}` 한 줄을 stdout 에 쓰고 사람용 설명을 stderr 에 쓴다. `details` 는 `room-session` 실패의 `details` 그대로다(`DIRECT_CONNECT_FAILED` 의 피어별 단계 등).
+- 제어 문자는 이스케이프한다. `JSON.stringify` 는 C0 만 바꾸므로 `jsonLine` 이 DEL, C1, U+2028·U+2029, 양방향 제어도 `\u00XX` 로 바꾼다(JSON 문자열 안이라 되읽으면 원래 글이다). 색은 쓰지 않는다.
+
+**종료와 종료 코드**
+
+| 코드 | 언제 |
+|---|---|
+| 0 | 사용자가 끝냈다(SIGINT·SIGTERM·SIGHUP), 또는 stdout 이 닫혔다(파이프의 읽는 쪽이 끝남. `EPIPE`) |
+| 1 | 입장 실패(`SIGNALING_ERROR`·`DIRECT_CONNECT_FAILED`·`SERVER_UNREACHABLE`·`PEER_VERSION_MISMATCH`·`NATIVE_LOAD_FAILED`), 실행 중 예상 못 한 예외 |
+| 2 | 인자·설정 오류(방 ID 형식, 서버 주소, 이름, ICE 설정, 모르는 옵션) |
+| 130 | 정리 중 두 번째 Ctrl-C. 정리를 기다리지 않고 끝낸다 |
+
+- 절차: 첫 신호 → `session.shutdown(MONITOR_SHUTDOWN_BUDGET_MS)`(1500ms **[제안]**. `bye{shutdown}` → 서버 `leave` → `mesh.shutdown`) → `--json` 이면 `end` 줄 → 로그 `close(500)` → `process.exit(코드)`. 네이티브 핸들이 남으므로 `entry/mcp` 처럼 `process.exit` 으로 끝낸다. 관전 도구는 자식 프로세스를 띄우지 않는다. 그래서 끝난 뒤 남는 프로세스가 없다(`V-L13` 이 본다).
+- 입장 중의 Ctrl-C 는 `observe` 를 취소한다(`signal`). 입장 실패와 같이 정리하고(`room-session` 이 `bye{leave}`·서버 `leave`·링크 정리를 한다. `shutdown` 은 부르지 않는다) 종료 코드 0 이다.
+- **시그널링이 끊겨도 계속 본다.** `room-session` 의 재접속 규칙 그대로다([protocol.md 2.7](protocol.md#27-재접속)). 출력에는 `system` 사건(`signaling_blocked`, `signaling_detached`)과, 상태가 `reconnecting` 으로 바뀌고 돌아올 때 알림 한 줄씩이 나온다(`runMonitor` 가 `observed().signaling` 을 2초마다 보고 바뀌면 쓴다. 간격 `MONITOR_POLL_MS` 2000 은 정한 값이다 **[제안]**). 열린 DataChannel 로 채팅과 상태를 계속 받는다.
+- 참가자가 모두 나가도 끝내지 않는다. "방에 관전자만 남았다" 알림을 한 번 쓴다(같은 2초 점검).
+
+**불변조건**
+
+- 채팅을 보내지 않고 기록을 쓰지 않는다. `runMonitor` 는 `RoomSession` 에서 `observe`, `observed`, `shutdown` 만 부른다(`V-U12` 가 가짜 세션의 호출 목록으로 본다).
+- 진단 로그 규칙([6.2](#62-필드-규칙))이 그대로 걸린다. 로그에는 본문과 방 ID 원문이 없다(`room-session` 은 `room_ref` 만 남긴다). `monitor` 모듈이 남기는 사건은 `monitor.start`(`outcome`, `error_code`, `duration_ms`), `monitor.end`(`reason`, `events`(쓴 사건 수), `events_dropped`(싱크가 넘쳐 버린 수. `dropped` 는 로거만 붙이는 필드라 쓰지 않는다))뿐이다. `events`·`events_dropped` 는 진단 필드 허용 목록에 더한다. 출력(stdout)은 로그가 아니다.
+- 전역 시계와 타이머는 `entry/monitor` 만 부른다. `monitor` 모듈은 `now`, `timers`, `write`, `clock`(지역 시각 문자열을 만드는 함수)을 주입받는다. `node:test` 로 시험한다.
+- stdout 과 `console` 은 `entry/monitor` 만 쓴다. 네트워크·파일에 닿지 않는다(연결은 `room-session` 아래 모듈이 한다).
+- **의존**: `room-session/contract.ts`, `inbox/contract.ts`(사건 타입), `protocol`(이름·방 ID·주소·ICE 검증), 로그 포트.
+- **검증**: `V-U12`(단위), `V-L13`(로컬 실물), `V-P8`(공용 서버).
+
 ## 4. 폴더 구조
 
 ```text
-package.json                  # 단일 패키지. bin: agent-chat-mcp, agent-chat-server, agent-chat
+package.json                  # 단일 패키지. bin: agent-chat-mcp, agent-chat-server, agent-chat, agent-chat-monitor
 tsconfig.json
 installer/                    # 설치 진입점 (사람·에이전트 공통). POSIX sh. Node 를 찾아 scripts/install.mjs 에 넘긴다
   install.sh                  #   Claude Code + Codex
@@ -543,8 +678,9 @@ installer/                    # 설치 진입점 (사람·에이전트 공통). 
   *.test.mjs                  #   셸 진입점 시험 (node:test. 공백이 든 임시 폴더, 가짜 호스트 CLI, 임시 HOME)
 scripts/
   install.mjs                 # 의존성 없이 도는 설치 본체 (위치 확인 → npm ci → build → setup → doctor). sh 가 없으면 직접 실행
+  monitor.sh                  # 관전 진입점 (POSIX sh). Node 를 찾아 dist/entry/monitor.js 로 exec 한다(3.14)
 src/
-  entry/                      # 조립만. mcp.ts, server.ts, lambda.ts, cli.ts
+  entry/                      # 조립만. mcp.ts, server.ts, lambda.ts, cli.ts, monitor.ts
   protocol/
   diagnostics/
   signaling-core/
@@ -558,6 +694,7 @@ src/
   room-session/
   mcp-server/
   setup/
+  monitor/                    # 관전 도구: contract.ts, args.ts, format.ts(터미널 안전 포함), sink.ts, run.ts, index.ts (3.14)
 deployments/
   aws/                        # template.yaml, deploy.sh, destroy.sh, verify.mjs
   self-host/                  # systemd 유닛 예시, 실행 안내
@@ -600,7 +737,7 @@ docs/
 | `AGENT_CHAT_HOME` | `~/.agent-chat` | 기록, 로그, 설치된 저장소의 뿌리 디렉터리 | **[제안]** |
 | `AGENT_CHAT_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` | 로깅 가이드 |
 
-설치기만 읽는 환경 변수(`AGENT_CHAT_NODE`, `AGENT_CHAT_CLAUDE_BIN`, `AGENT_CHAT_CODEX_BIN`, `AGENT_CHAT_IN_PLACE`)는 [3.13](#313-setup)에 있다. MCP 프로세스는 읽지 않고, 설치가 MCP 등록에 넣지도 않는다.
+설치기만 읽는 환경 변수(`AGENT_CHAT_NODE`, `AGENT_CHAT_CLAUDE_BIN`, `AGENT_CHAT_CODEX_BIN`)는 [3.13](#313-setup)에 있다. MCP 프로세스는 읽지 않고, 설치가 MCP 등록에 넣지도 않는다.
 
 **`AGENT_CHAT_WAIT_MAX_SEC` 을 클라이언트별로 다르게 두는 근거**
 
@@ -667,6 +804,8 @@ docs/
 | 공용 서버가 연결을 왜 받지 않았나. 이벤트를 처리하지 못했나 | `signaling-aws` | `conn.refused{reason: origin}`(`$connect` 의 403), `event.invalid`(`reason`: `shape` 이벤트 모양이 틀림, `endpoint` 연결 관리 주소를 만들 수 없음), `handler.failed`(처리 중 예외. 밖으로 던지지 않는다), `config.problem`(`LOG_LEVEL` 이 틀림) | `reason`, `error_code`, `kind`(이벤트 종류), `name` | `conn_ref` | `V-P1`, `V-P5` |
 | 서버 자원이 어떤 상태인가 | `signaling-selfhost` | `server.stats` (60초마다) | `connections`, `rooms`, `rejected`, `loop_lag_ms`, `rss_mb` | 없음 | 결함 주입 중 관찰 |
 | 설치가 어느 단계에서 멈췄나 | `setup` | `setup.step`, `doctor.check` | `step`, `outcome`, `error_code`, `host`, `duration_ms` | 없음 | `V-L10`, `V-S1` |
+| 상대 에이전트가 왜 답하지 않나(수신 점검, 읽음 확인, 듣기 멈춤) | `room-session`, `inbox`, `mcp-server` | `chat.ping`, `chat.read_receipt`, `delivery.paused`, `listen_state.write`(Stop hook 이 읽는 상태 파일 쓰기 실패) | `msg_id`, `targets`, `read`, `not_listening`, `peer`, `outcome`, `error_code` | `sid` | 단위 시험 |
+| 관전이 왜 들어가지 못했나. 언제 왜 끝났나. 출력하지 못한 사건이 있었나 | `monitor`(그 아래 입장·링크·병합은 위 표의 `room-session`·`mesh`·`signaling-client` 사건 그대로) | `monitor.start`, `monitor.end` | `outcome`, `error_code`, `duration_ms`, `reason`, `events`, `events_dropped` | `room_ref`, `sid`(`room-session` 의 `join.end` 와 같은 줄로 잇는다) | `V-L13` |
 
 - 위 표는 **진단 질문에 답하는 사건**이다. 모듈은 이 밖에 자기 결함을 알리는 사건을 낼 수 있다. 필드는 모두 [허용 목록](#62-필드-규칙) 안이다. 지금 있는 것: `room-session` 의 `p2p.bad_frame`, `p2p.protocol_error`, `p2p.encode_failed`, `state.send_failed`, `record.failed`, `presence.write_failed`, `notice.failed`. `mcp-server` 의 `tool.call`, `tool.error`, `mcp.connect`, `mcp.error`. `inbox` 의 `inbox.error`, `inbox.listener_error`. `signaling-core` 의 `send.invalid`, `send.failed`, `message.failed`, `disconnect.failed`. `signaling-selfhost` 의 `conn.task_failed`, `server.error`. `diagnostics` 의 `log.cleanup`.
 - F-03(미입장 기한)의 관측은 `conn.closed` 가 아니라 `conn.drop{reason: join_deadline}` 이다. `conn.closed` 는 등록이 지워질 때만 나온다.
@@ -675,7 +814,7 @@ docs/
 
 ### 6.2 필드 규칙
 
-- 공통 필드: `ts`(UTC ISO 8601), `level`, `svc`(`mcp` \| `server` \| `lambda` \| `cli`), `proc`(프로세스마다 새로 만드는 무작위 6자), `mod`, `event`. 해당할 때만 `outcome`, `error_code`, `duration_ms`, `attempt`.
+- 공통 필드: `ts`(UTC ISO 8601), `level`, `svc`(`mcp` \| `server` \| `lambda` \| `cli` \| `monitor`), `proc`(프로세스마다 새로 만드는 무작위 6자), `mod`, `event`. 해당할 때만 `outcome`, `error_code`, `duration_ms`, `attempt`.
 - `proc` 은 **모든 줄에** 있다. 한 PC 에서 여러 MCP 프로세스가 같은 로그 디렉터리를 쓰기 때문이다(검증 환경은 프로세스 4~8개, 실제 사용에서도 Claude Code 와 Codex 세션이 함께 돈다).
 - **남기지 않는 것**: 채팅 본문, 상태 기록의 글자 필드(요청문, 행동, 증거 등), SDP, candidate, `key`, 방 ID 원문, IP 주소 원문, 환경 변수 값, 게이트웨이 프레임 본문.
 - 방 ID 는 접근 수단이므로 `room_ref`(SHA-256 앞 12자리)로 남긴다. 연결 ID 는 `conn_ref`, IP 는 `ip_ref` 로 같은 방식이다.
@@ -690,7 +829,7 @@ docs/
 
 | 프로세스 | 출력 | 보존 |
 |---|---|---|
-| MCP, 설치 CLI | `<AGENT_CHAT_HOME>/logs/diag-<UTC 연월일>T<시>-<proc>.jsonl`. 프로세스마다 파일이 다르다. 디렉터리 0700, 파일 0600. `warn` 이상은 stderr 에도 쓴다(stderr `error` 리스너 필수 **[실측 PRE-MCP-10, 11]**) | 시작 시 1회, 이후 1시간마다 정리. **파일 이름의 시간 구간**이 7일을 넘은 파일을 지운다. 기준은 구간의 **끝**(시작 + 1시간)이다. 끝에서 7일을 넘겨야 지우고 정확히 7일이면 남긴다. 어떤 줄도 7일 전에 지워지지 않고, 가장 오래 남는 줄은 약 7일 2시간이다. `mtime` 을 쓰지 않는다. 디렉터리 전체가 200MB 를 넘으면 오래된 파일부터 더 지운다 |
+| MCP, 설치 CLI, 관전 | `<AGENT_CHAT_HOME>/logs/diag-<UTC 연월일>T<시>-<proc>.jsonl`. 관전은 `warn` 이상의 stderr 사본을 끈다(`stderrCopy: false`. [3.12](#312-diagnostics)). 프로세스마다 파일이 다르다. 디렉터리 0700, 파일 0600. `warn` 이상은 stderr 에도 쓴다(stderr `error` 리스너 필수 **[실측 PRE-MCP-10, 11]**) | 시작 시 1회, 이후 1시간마다 정리. **파일 이름의 시간 구간**이 7일을 넘은 파일을 지운다. 기준은 구간의 **끝**(시작 + 1시간)이다. 끝에서 7일을 넘겨야 지우고 정확히 7일이면 남긴다. 어떤 줄도 7일 전에 지워지지 않고, 가장 오래 남는 줄은 약 7일 2시간이다. `mtime` 을 쓰지 않는다. 디렉터리 전체가 200MB 를 넘으면 오래된 파일부터 더 지운다 |
 | 자체 호스팅 서버 | 기본은 stdout JSONL. `--log-dir <경로>` 를 주면 MCP 와 같은 파일 로거를 쓴다 | `--log-dir` 를 주면 제품이 7일 정리를 한다. stdout 이면 운영자의 수집기(예: journald)가 보존을 맡는다([deployment.md](deployment.md#34-로그와-상태-확인)) |
 | Lambda | `console.log` JSON → CloudWatch Logs | 로그 그룹 보존 7일 |
 
@@ -953,6 +1092,31 @@ docs/
 - 진입점과 환경 변수, 단계별 결과, 판정표, 점검표, 바꾸는 파일은 [3.13](#313-setup)에 있다. 제거는 `sh installer/install.sh --uninstall` 이다.
 - 에이전트는 권한·허용 목록·hook 설정을 고치지 않는다. 저장소 README 와 안내서에 그렇게 적는다([mcp-interface.md 10절](mcp-interface.md#10-권한-경계)).
 
+### S16. 콘솔에서 방을 지켜본다 (관전)
+
+- 전제: 방에 A, B, C 가 있다(새 버전). 사용자 U 가 A 의 PC 에서 방을 지켜보고 싶다. 이름 순서는 A < B < C < `observer-4k2q`(O)라고 하자.
+
+1. U 가 A 에게 "이 방을 지켜보고 싶다"고 한다. A 가 `get_status` 의 `room.monitor_command` 를 알려 준다. U 가 콘솔에서 그 명령(`sh '…/scripts/monitor.sh' <room_id> <server>`)을 실행한다. 다른 PC 의 사람이면 README 대로 `room_id` 와 서버를 받아 자기 설치로 실행한다.
+2. `monitor.sh` 가 Node 를 찾아 `exec node dist/entry/monitor.js <room_id> <server>` 한다. `entry/monitor` 가 `parseMonitorArgs` 로 인자와 환경을 해석하고, 로거(`svc=monitor`, stderr 사본 없음), `createMonitorSink`, `createRoomSession`(하위 모듈 실물, `inbox` 자리에 싱크)을 만들고 `runMonitor` 를 부른다. stderr 에 "들어가는 중…"을 쓴다.
+3. `runMonitor` 가 `session.observe({room_id, server, name})` 를 부른다. `room-session` 이 관전 모드로 방을 조립하고 `join(mode=join)` 을 보낸다. 서버는 O 를 보통 참가자로 등록하고 `joined{members:[A,B,C]}` 를 돌려준다.
+4. 필수 피어 {A, B, C} 와 S2 와 같이 연결한다. O 가 가장 크므로 셋에게 `offer-request` 를 보내고 셋이 `offer` 한다. 링크가 열리면 양쪽이 `hello` 를 보낸다. O 의 `hello` 에는 `observer: true` 가 있다.
+5. A, B, C 는 O 의 `hello` 로 O 를 관전자로 적는다(`observers.ts`). 스냅샷을 주고받는다. O 는 받은 기록을 병합하고, 자기 복제본(남이 쓴 기록뿐)을 스냅샷으로 보낸다. A, B, C 는 O 의 링크가 동기화되면 수신함에 `peer` / `observer_joined` 를 넣는다. 에이전트의 `get_status` 에는 `observers` 에 O 가 있고 `participants` 와 그 `shown_as` 는 그대로다.
+6. 셋과 동기화되면 `observe` 가 `RoomObserved` 를 돌려준다. `runMonitor` 가 요약을 쓰고, "여기부터 실시간" 줄을 쓰고, `sink.start()` 로 그동안 받아 둔 사건(입장 중의 채팅)을 쓴다. O 는 `presence` 를 쓰지 않는다.
+7. B 가 방 전체에 글을 쓴다. B 의 `room-session` 이 동기화된 링크 전부(A, C, O)에 `chat` 을 보낸다. O 의 `room-session` 이 검증·중복 확인 뒤 `ack` 하고 사건을 싱크에 넣는다. 싱크가 한 줄을 쓴다. B 의 결과 `delivered` 에 O 가 들어 있다.
+8. C 가 A 에게만 글을 쓴다(`to: [A]`). O 에게는 가지 않는다. O 의 출력에 없다.
+9. A 가 시나리오를 시작하고 B 가 주장을 쓰고 C 가 검증한다. 변경이 O 의 링크로도 간다. O 의 `room-session` 이 병합하고 관전 모드의 사건(`scenario`, `claim`, `verification`, `peer` / `status`)을 싱크에 넣는다.
+10. 시그널링 서버가 다시 시작한다. O 의 `signaling-client` 가 재접속한다(S6). 그동안 링크는 그대로라 7·9 가 계속 출력된다. 출력에 "시그널링 재접속 중" 알림이 한 줄 나온다.
+11. U 가 Ctrl-C 를 누른다. `entry/monitor` 가 `MonitorHandle.stop('interrupted')` 를 부른다. `session.shutdown(1500)` 이 `bye{shutdown}` 을 보내고 서버에서 나가고 링크를 닫는다. A, B, C 는 O 의 링크가 `bye` 로 닫혔으므로 `observer_left` 를 내고 `observers` 에서 O 를 뺀다. `entry/monitor` 가 로그를 닫고 `process.exit(0)` 한다.
+
+- 끝 상태: 관전 프로세스가 없다. 방의 공유 상태에 O 가 쓴 기록이 하나도 없다. A, B, C 의 대화와 테스트는 O 가 없었을 때와 같다.
+- 실패:
+  - 방이 비어 있다 → `SIGNALING_ERROR{ROOM_NOT_FOUND}`. "방이 없다. 방 ID 와 서버를 확인하라" 출력, 종료 코드 1.
+  - 정원이 찼다 → `ROOM_FULL`. "관전자도 정원(8)을 하나 차지한다" 출력, 종료 코드 1.
+  - 참가자 하나와 직접 연결이 안 된다 → `DIRECT_CONNECT_FAILED`. 피어별 단계와 "관전자도 중계 없이 직접 연결해야 한다" 출력, 종료 코드 1. 링크와 서버 등록이 남지 않는다(S3 과 같은 정리).
+  - 이름이 겹친다 → `NAME_IN_USE`. "`--name` 으로 다른 이름을 주라" 출력, 종료 코드 1.
+- 관전 중에 새 참가자 J 가 들어오면 J 에게 O 는 필수 피어다(protocol.md 4.6 의 한계). J 와 O 가 직접 연결되면 O 의 출력에 J 의 입장(`presence` 의 `joined`)이 나온다.
+- A 가 구버전이면 A 와의 링크의 `hello` 에 `observer` 가 없다. O 의 출력에 "A 는 관전자를 모른다" 알림이 한 번 나온다(요약의 `unaware` 에도 있다). A 의 `get_status` 에는 O 가 `not_ready` 참가자로 보인다.
+
 ## 8. 연결의 필요성
 
 각 연결이 어떤 시나리오 때문에 필요한지 적는다. 빼면 그 시나리오가 성립하지 않는다.
@@ -973,6 +1137,10 @@ docs/
 | `entry/cli` → `setup` | S15 |
 | `setup` → 등록된 `agent-chat-mcp` 프로세스 (MCP stdio) | S15 (연결 점검이 제품 경로를 그대로 지난다) |
 | `mcp-server` → `channel-check.json` → `setup` | S4(확인 기록), S15(Channels 보고의 "가능") |
+| `mcp-server` → `listen/<pid>.json` → `setup`(Stop hook) | 사용자가 켠 Stop hook 의 턴 종료 판정([mcp-interface.md 7.4](mcp-interface.md#74-선택형-stop-hook-claude-code)) |
+| `scripts/monitor.sh` · `entry/cli`(`monitor`) → `entry/monitor` | S16 (사람이 콘솔에서 스크립트 하나로 관전한다) |
+| `entry/monitor` → `monitor`, `room-session`(관전 모드) | S16 (관전자도 같은 시그널링·mesh·복제본을 쓴다. 채팅을 다른 경로로 받지 않는다) |
+| `monitor` → `room-session`(계약: `observe`, `observed`, `shutdown`), `inbox`(계약: 사건 타입) | S16 |
 
 **시그널링 메시지**
 
@@ -993,6 +1161,7 @@ docs/
 | 메시지 | 필요한 시나리오 |
 |---|---|
 | `hello` | S2, S7 (신원 확인, 재시작 구분, 버전 확인) |
+| `hello.observer` | S16 (관전자를 참가자 표시·준비 판정에서 빼고, 관전자 링크의 채팅과 변경을 버리고, 관전 사실을 알린다. 구버전을 가린다) |
 | `state`, `sync_end` | S2, S7, S10~S12 |
 | `sync_end.test_id`, `sync_end.test_elapsed_ms` | S7, S12 (늦게 들어온 참가자가 시계 차이 없이 기한을 잰다. `test_id` 는 다른 테스트의 경과 시간이 섞이지 않게 한다) |
 | `chat`, `ack` | S4, S9 |

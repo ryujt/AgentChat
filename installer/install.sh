@@ -1,9 +1,9 @@
 #!/bin/sh
-# Agent Chat 설치 프로그램 (Claude Code·Codex 통합).
+# Agent Chat 설치 프로그램 (Claude Code·Codex·Gemini CLI 통합).
 #
 # Node 를 찾아 scripts/install.mjs 에 --client all 로 넘긴다. 의존성 설치, 빌드, MCP 등록,
 # Channels 보고, 연결 점검, 안내는 그쪽이 한다. 권한 설정은 바꾸지 않는다.
-# 호스트 하나만 다루려면 installer/claude.sh, installer/codex.sh 를 쓴다(인자는 같다).
+# 호스트 하나만 다루려면 installer/claude.sh, installer/codex.sh, installer/gemini.sh 를 쓴다(인자는 같다).
 #
 # 사용법:
 #   sh installer/install.sh              # 설치 또는 갱신 (--install 과 같다)
@@ -13,11 +13,11 @@
 #   AGENT_CHAT_NODE        설치에 쓸 Node 실행 파일 (기본값: PATH 의 node). 22 이상이어야 한다.
 #                          셸이 찾은 경로(command -v 의 결과. 링크면 링크 그대로)가 MCP 등록의 명령이 된다.
 #                          brew 의 /opt/homebrew/bin/node 처럼 버전마다 바뀌지 않는 링크를 쓰면 Node 를 올려도 등록이 그대로다
-#   AGENT_CHAT_HOME        설치 뿌리 (기본값: $HOME/.agent-chat). 저장소는 그 아래 app 에 둔다
+#   AGENT_CHAT_HOME        기록·로그·백업을 두는 곳 (기본값: $HOME/.agent-chat). 저장소는 받은 자리에서 그대로 등록한다
 #   AGENT_CHAT_CLAUDE_BIN  Claude Code CLI 실행 파일 (기본값: claude)
 #   AGENT_CHAT_CODEX_BIN   Codex CLI 실행 파일 (기본값: codex)
+#   AGENT_CHAT_GEMINI_BIN  Gemini CLI 실행 파일 (기본값: gemini)
 #   AGENT_CHAT_SERVER      연결 점검이 쓸 시그널링 서버 주소 (기본값: 공용 서버)
-#   AGENT_CHAT_IN_PLACE    1 이면 설치 위치가 아닌 이 자리의 저장소를 그대로 등록한다 (개발용)
 #
 # 종료 코드: 0 성공, 1 실패(Node 없음·인자 오류 포함), 2 실패는 없지만 등록한 호스트 없음.
 

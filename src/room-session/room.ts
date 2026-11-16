@@ -1,6 +1,8 @@
 // 방 참가 한 번 (architecture.md 3.10 의 "입장·보정"과 "종료", 7절의 S1~S13).
 // 하위 모듈을 만들어 서로 잇고, 입장 절차와 필수 피어 판정, 방 동작(채팅, 명령, 상태, 보고서), 퇴장과 종료의 순서를 맡는다.
 // 병합은 shared-state, 연결은 mesh, 전달은 inbox 가 한다. 시그널을 내보내는 일은 signal-gate.ts 만 한다.
+// 관전 모드(role: observer. protocol.md 4.6)는 같은 입장·보정·동기화·수신을 하되 쓰지 않는다:
+// presence·기한 중단·채팅을 쓰지 않고 기록 파일을 열지 않는다. 관전자 링크의 처리는 두 모드에 공통이다.
 
 import type { AttemptFailed, Mesh } from '../mesh/contract.js';
 import { LIMITS, refOf } from '../protocol/index.js';
@@ -14,11 +16,17 @@ import type {
   ChatSent,
   CommandOutputs,
   FailedPeer,
+  NotListening,
+  ObserverView,
   ParticipantView,
+  PingArgs,
+  PingPeer,
+  PingSent,
   Reach,
   ReportWritten,
   RoomEntered,
   RoomLeft,
+  RoomObserved,
   RoomSessionDeps,
   SendChatArgs,
   SessionCommand,
@@ -32,14 +40,27 @@ import { createEventSink } from './events.js';
 import type { EventSink } from './events.js';
 import { createMeshKeeper } from './mesh-keeper.js';
 import type { MeshKeeper } from './mesh-keeper.js';
+import { createObserverBook } from './observers.js';
+import type { ObserverBook } from './observers.js';
 import { createP2PSession } from './p2p-session.js';
 import type { P2PSession, SessionFailureReason } from './p2p-session.js';
 import { createGatedMesh } from './signal-gate.js';
 import type { SignalGate } from './signal-gate.js';
-import { claimCounts, participantView, reportInput, selfParticipant, testStatus } from './views.js';
+import {
+  claimCounts,
+  observedClaims,
+  observedScenarios,
+  participantView,
+  reportInput,
+  selfParticipant,
+  testStatus,
+  toIso,
+} from './views.js';
 
 export interface RoomParams {
   readonly mode: 'create' | 'join';
+  /** observer 면 관전 모드다(observe). 그때 mode 는 늘 join 이다. */
+  readonly role: 'participant' | 'observer';
   readonly roomId: string;
   readonly name: string;
   readonly sid: string;
@@ -63,10 +84,13 @@ export interface Room {
   /** 어느 때든 부를 수 있다. 예산을 넘기면 남은 단계를 건너뛴다. reject 하지 않는다. */
   shutdown(budgetMs: number): Promise<void>;
   sendChat(args: SendChatArgs): Promise<SessionResult<ChatSent>>;
+  ping(args: PingArgs): Promise<SessionResult<PingSent>>;
   command(command: SessionCommand): SessionResult<CommandOutputs[keyof CommandOutputs]>;
   status(): SessionStatus;
   notice(): SessionNotice;
   writeReport(): Promise<SessionResult<ReportWritten>>;
+  /** 관전 요약. 입장한 뒤에만 부른다. 방 ID 를 싣지 않는다. */
+  observed(): RoomObserved;
 }
 
 type FailedEntry = FailedPeer & { readonly theirs: number | null };
@@ -97,9 +121,16 @@ interface Parts {
   readonly p2p: P2PSession;
   readonly chat: ChatDelivery;
   readonly keeper: MeshKeeper;
+  readonly observers: ObserverBook;
 }
 
 const CANCELLED: SessionFailure = { ok: false, code: 'CANCELLED', detail: 'the call was cancelled or the process is shutting down' };
+const OBSERVING: SessionFailure = { ok: false, code: 'NOT_IN_ROOM', detail: 'observing read-only' };
+
+/** 점검 글. 다른 참가자의 에이전트가 읽는다(영어). 읽음 확인은 자동이라 답장이 필요 없다. */
+function pingText(from: string): string {
+  return `Agent Chat check from ${from}: reading this sends a read receipt automatically. No reply is needed.`;
+}
 
 function isJoinFailure(value: unknown): value is SignalingJoinFailure {
   return typeof value === 'object' && value !== null && typeof (value as { code?: unknown }).code === 'string';
@@ -108,6 +139,7 @@ function isJoinFailure(value: unknown): value is SignalingJoinFailure {
 export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
   const { now, timers, log, inbox } = deps;
   const { name, sid } = params;
+  const observing = params.role === 'observer';
   const roomRef = refOf(params.roomId);
   const meta: RecordsMeta = {
     server_key: params.server.serverKey,
@@ -134,6 +166,8 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
   let lastListeningWrite = Number.NEGATIVE_INFINITY;
   let listeningTimer: TimerHandle | null = null;
   const subscriptions: Unsubscribe[] = [];
+  /** 관전 모드에서 "관전자를 모른다" 알림을 낸 참가자. 참가자마다 한 번이다. */
+  const unawareNotified = new Set<string>();
 
   const active = (): boolean => stage === 'entering' || stage === 'in';
 
@@ -142,11 +176,15 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
   const ownPresence = (view: ReplicaView): PresenceView | undefined =>
     view.presences.find((presence) => presence.peer === name);
 
-  /** 자신을 뺀 참가자. presence 가 있는 이름, 링크가 있거나 시도 중인 피어, 서버가 준 목록의 합집합이다. */
+  /**
+   * 자신을 뺀 참가자. presence 가 있는 이름, 링크가 있거나 시도 중인 피어, 서버가 준 목록의 합집합이다.
+   * 알려진 관전자는 뺀다. 관전자는 준비 판정과 도달 범위에 들지 않는다(protocol.md 4.6).
+   */
   const participants = (p: Parts, view: ReplicaView): ParticipantView[] => {
     const attempting = new Set(p.mesh.links().map((link) => link.peer));
     const names = new Set<string>([...view.presences.map((presence) => presence.peer), ...attempting, ...p.keeper.members()]);
     names.delete(name);
+    for (const observer of p.observers.names()) names.delete(observer);
     return [...names].sort().map((peer) => {
       const synced = p.p2p.link(peer)?.synced === true;
       const facts = p.keeper.facts(peer, attempting.has(peer));
@@ -158,11 +196,27 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
     });
   };
 
-  /** 기록을 보낸 링크의 참가자와, 방에 있지만(서버 목록) 나와 링크가 없는 참가자. */
+  /** 기록을 보낸 링크의 참가자와, 방에 있지만(서버 목록) 나와 링크가 없는 참가자. 둘 다 알려진 관전자는 뺀다. */
   const reachOf = (p: Parts, sentTo: readonly string[]): Reach => ({
-    sent_to: [...sentTo].sort(),
-    not_connected: p.keeper.members().filter((peer) => !sentTo.includes(peer)).sort(),
+    sent_to: sentTo.filter((peer) => !p.observers.has(peer)).sort(),
+    not_connected: p.keeper
+      .members()
+      .filter((peer) => !sentTo.includes(peer) && !p.observers.has(peer))
+      .sort(),
   });
+
+  /** 지금 링크가 있거나 서버 목록에 있는 관전자. */
+  const observersOf = (p: Parts): ObserverView[] => {
+    const attempting = new Set(p.mesh.links().map((link) => link.peer));
+    return p.observers.list(
+      (peer) => (p.p2p.link(peer)?.synced === true ? 'open' : attempting.has(peer) ? 'connecting' : 'none'),
+      p.keeper.members(),
+    );
+  };
+
+  /** 관전자 링크인가. 그 링크의 hello 로 알거나, hello 전에 닫혔으면 이 세션이 적어 둔 관전자 목록으로 안다. */
+  const isObserverLink = (p: Parts, peer: string, observer: boolean | null): boolean =>
+    observer === true || (observer === null && p.observers.has(peer));
 
   const syncedPeers = (p: Parts): string[] =>
     p.p2p
@@ -341,7 +395,10 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
       checkEntering();
       return;
     }
-    if (verdict.unreachable !== null) p.events.peerChanged(failure.peer, 'unreachable', verdict.unreachable, true);
+    // 관전자는 참가자 사건을 만들지 않는다. 닿지 않는 관전자는 내 글을 못 볼 뿐이다.
+    if (verdict.unreachable !== null && !p.observers.has(failure.peer)) {
+      p.events.peerChanged(failure.peer, 'unreachable', verdict.unreachable, true);
+    }
   };
 
   const onLinkClosed = (p: Parts, peer: string, reason: string): void => {
@@ -353,7 +410,12 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
     // mesh 가 스스로 닫은 링크만 바로 다시 접촉한다. 그 밖(hello 불일치, 프로토콜 오류, 버전)은 다음 목록 갱신 때다.
     const quickRetry = reason === 'ping_timeout' || reason === 'failed' || reason === 'closed' || reason === 'replaced';
     p.keeper.linkClosed(peer, last.synced, quickRetry);
-    if (!byBye) p.events.peerChanged(peer, 'disconnected', reason, last.synced);
+    if (isObserverLink(p, peer, last.observer)) {
+      // 관전자 링크가 닫혔다. 동기화까지 열렸던 링크(observer_joined 를 낸 것)만 알린다. 참가자 사건은 내지 않는다.
+      if (last.synced) p.events.peerChanged(peer, 'observer_left', reason, true);
+    } else if (!byBye) {
+      p.events.peerChanged(peer, 'disconnected', reason, last.synced);
+    }
     checkEntering();
   };
 
@@ -406,7 +468,20 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
           p.events.system('name_conflict', 'Another session with the same name is registered on the signaling server.', {});
         }
       }),
+    );
+    // 관전 모드는 presence 를 쓰지 않고 기록 파일이 없다. 수신 상태와 전달 모드를 구독하지 않는다.
+    if (observing) return;
+    subscriptions.push(
       inbox.on('listening-changed', () => onListeningChanged()),
+      // 읽음 확인을 요청한 글을 에이전트가 꺼내 갔다. 보낸 참가자에게 ack{read: true} 를 돌려준다.
+      inbox.on('handed', (handed) => {
+        if (!active()) return;
+        for (const event of handed) {
+          if (event.kind !== 'chat' || event.id === null || event.data.read_receipt !== true) continue;
+          p.p2p.ack(event.from, event.id, true);
+          log.event('info', 'room-session', 'chat.read_receipt', { msg_id: event.id, peer: event.from });
+        }
+      }),
       inbox.on('mode-changed', (change) => {
         if (active()) p.events.record({ kind: 'mode', from: change.from, to: change.to, cause: change.cause });
       }),
@@ -416,7 +491,18 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
   /** 하위 모듈을 만들어 잇는다. mesh 를 만들지 못하면 사유를 돌려준다. join 을 보내기 전에 끝난다. */
   const assemble = async (): Promise<Parts | SessionFailure> => {
     const replica = deps.createReplica({ self: { peer: name, sid }, selfNames: [...params.selfNames] });
-    const events = createEventSink({ self: name, inbox, replica, now, timers, log, onDeadline: writeTimeLimitStop });
+    const events = createEventSink({
+      self: name,
+      inbox,
+      replica,
+      now,
+      timers,
+      log,
+      // 관전자는 기한 중단을 쓰지 않는다. 기한을 본 참가자가 쓴다.
+      onDeadline: observing ? null : writeTimeLimitStop,
+      audience: params.role,
+    });
+    const observers = createObserverBook();
     const client = deps.createSignalingClient({ url: params.server.url, now, timers, log, nextSeq: params.nextSeq });
     const gated = await createGatedMesh({
       client,
@@ -446,7 +532,7 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
     });
     let keeper: MeshKeeper | null = null;
     const p2p: P2PSession = createP2PSession({
-      self: { peer: name, sid },
+      self: { peer: name, sid, observer: observing },
       app: deps.app,
       mesh,
       replica,
@@ -457,8 +543,21 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
       hooks: {
         synced(peer) {
           const { reconnected } = keeper?.linkSynced(peer) ?? { reconnected: false };
-          if (reconnected) events.peerChanged(peer, 'reconnected', null, true);
+          // 관전자 링크가 동기화까지 열렸다. 감시받는다는 사실을 숨기지 않는다(입장 중이면 입장 결과의 observers 가 싣는다).
+          if (p2p.link(peer)?.observer === true) events.peerChanged(peer, 'observer_joined', null, true);
+          else if (reconnected) events.peerChanged(peer, 'reconnected', null, true);
           checkEntering();
+        },
+        greeted(peer, peerSid, observer) {
+          observers.greeted(peer, peerSid, observer, now());
+          if (observing && observer === null && !unawareNotified.has(peer)) {
+            unawareNotified.add(peer);
+            events.system(
+              'observer_unaware',
+              `${peer} runs an older version that does not know about observers. This observer is not shown on that side.`,
+              { peer },
+            );
+          }
         },
         failed(peer, reason, theirs) {
           const link = p2p.link(peer);
@@ -479,11 +578,16 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
             entering.required.delete(peer);
             entering.failed.delete(peer);
           }
+          if (p2p.link(peer)?.observer === true) {
+            // 관전자가 끝냈다. 목록에서 빼고, 링크가 닫힐 때 observer_left 를 낸다. 참가자의 퇴장이 아니다.
+            observers.left(peer, peerSid);
+            return;
+          }
           // presence{left} 가 먼저 와서 이미 알렸으면 되풀이하지 않는다. presence 를 쓴 적 없는 피어(입장에 실패한 참가자)는 알리지 않는다.
           const presence = replica.view(now()).presences.find((candidate) => candidate.peer === peer);
           events.peerChanged(peer, 'left', reason, presence !== undefined && presence.status !== 'left');
         },
-        chat(peer, frame) {
+        chat(peer, frame, fromObserver) {
           const verdict = chat.accept(peer, frame, name);
           if (verdict.kind === 'rate_exceeded' || verdict.kind === 'misaddressed') {
             p2p.countBadFrame(peer, verdict.kind);
@@ -491,12 +595,20 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
           }
           if (verdict.kind === 'new') {
             // ack 의 뜻: 형식을 검증했고, 중복을 걸렀고, 기록 파일에 쓰기를 요청했고, 수신함에 넣었다.
-            events.chatReceived({ id: frame.id, from: peer, to: verdict.to, text: frame.text, wall: frame.wall });
+            events.chatReceived({
+              id: frame.id,
+              from: peer,
+              to: verdict.to,
+              text: frame.text,
+              wall: frame.wall,
+              ...(frame.rr === true ? { readReceipt: true } : {}),
+              ...(fromObserver ? { fromObserver: true } : {}),
+            });
           }
           p2p.ack(peer, frame.id);
           log.event('info', 'room-session', 'chat.received', { msg_id: frame.id, peer, dup: verdict.kind === 'duplicate' });
         },
-        ack: (peer, id) => chat.ack(peer, id),
+        ack: (peer, id, read) => chat.ack(peer, id, read),
       },
     });
     keeper = createMeshKeeper({
@@ -506,7 +618,7 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
       now,
       timers,
     });
-    return { client, gate: gated.gate, mesh, replica, events, p2p, chat, keeper };
+    return { client, gate: gated.gate, mesh, replica, events, p2p, chat, keeper, observers };
   };
 
   // ── 정리 ──────────────────────────────────────────────────────────────────
@@ -661,9 +773,12 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
       if (cancelled) return finish(await failEntering(p, CANCELLED, 'join_cancelled'));
 
       // 링크가 열리기 전에 기록 파일을 연다. 그동안 mesh 가 내보내려는 시그널은 계속 들고 있다.
-      const opened = await deps.openTranscript({ dir: deps.config.home, meta, now, log });
-      p.events.attachTranscript(opened.ok ? opened.transcript : null);
-      if (cancelled) return finish(await failEntering(p, CANCELLED, 'join_cancelled'));
+      // 관전 모드는 열지 않는다. 콘솔 출력이 목적이고 채팅 본문을 이 PC 의 디스크에 남기지 않는다.
+      if (!observing) {
+        const opened = await deps.openTranscript({ dir: deps.config.home, meta, now, log });
+        p.events.attachTranscript(opened.ok ? opened.transcript : null);
+        if (cancelled) return finish(await failEntering(p, CANCELLED, 'join_cancelled'));
+      }
 
       p.keeper.setMembers(members.members, members.requestedAt);
       const outcome = await new Promise<EnterOutcome>((settle) => {
@@ -690,15 +805,18 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
       // 재입장이면 옛 역할과 도구를 이어받는다. 지우면 다른 참가자의 역할 현황에서도 사라지고, 문맥을 잃은 에이전트가
       // 자기 역할을 알 길이 없다(PRD "재입장한 에이전트에는 … 역할 현황을 전달한다", 검토 1차 PRODUCT-R1-01).
       // 상태는 joined 로 둔다(다시 준비를 알려야 한다). 메모는 옛 진행 상황이라 비운다.
+      // 관전자는 presence 를 쓰지 않는다(공유 상태에 기록을 쓰지 않는다).
       const previous = ownPresence(p.replica.view(now()));
-      writePresence(p, {
-        client: deps.config.client,
-        tools: previous === undefined ? [] : [...previous.tools],
-        role: previous?.role ?? null,
-        status: 'joined',
-        listening: inbox.listening(),
-        note: null,
-      });
+      if (!observing) {
+        writePresence(p, {
+          client: deps.config.client,
+          tools: previous === undefined ? [] : [...previous.tools],
+          role: previous?.role ?? null,
+          status: 'joined',
+          listening: inbox.listening(),
+          note: null,
+        });
+      }
       params.signal?.removeEventListener('abort', onAbort);
       logJoinEnd(startedAt, null);
       const at = now();
@@ -711,6 +829,7 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
         name,
         participants:
           params.mode === 'create' ? [selfParticipant(name, mine, deps.config.client)] : participants(p, view),
+        observers: params.mode === 'create' ? [] : observersOf(p),
         test: params.mode === 'create' ? null : testStatus(view.test, view.scenarios, at),
         you: {
           role: mine?.role ?? null,
@@ -739,6 +858,59 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
 
   // ── 방 동작 ───────────────────────────────────────────────────────────────
 
+  /** 이름 가운데 지금 에이전트가 듣고 있지 않은 참가자(presence.listening 이 거짓)와 그렇게 된 시각. */
+  const notListeningOf = (p: Parts, names: readonly string[]): NotListening[] => {
+    const at = now();
+    const view = p.replica.view(at);
+    const result: NotListening[] = [];
+    for (const peer of names) {
+      const presence = view.presences.find((candidate) => candidate.peer === peer);
+      if (presence === undefined || presence.status === 'left' || presence.listening) continue;
+      result.push({ name: peer, since: toIso(p.events.notListeningSince(peer) ?? presence.wall, at) });
+    }
+    return result;
+  };
+
+  /** 보내고 기록 파일과 로그에 남긴다. sendChat 과 ping 이 같이 쓴다. */
+  const deliverChat = async (
+    p: Parts,
+    args: SendChatArgs,
+    readReceipt: boolean,
+  ): Promise<Awaited<ReturnType<ChatDelivery['send']>>> => {
+    const open = syncedPeers(p);
+    const others = participants(p, p.replica.view(now()));
+    // 방 전체 글은 관전자에게도 간다(동기화된 링크 전부). 관전자를 대상으로 지정할 수도 있다(답하지는 못한다).
+    const outcome = await p.chat.send(
+      args,
+      {
+        open,
+        absent: p.keeper.members().filter((peer) => !open.includes(peer)),
+        known: [...others.map((other) => other.name), ...observersOf(p).map((observer) => observer.name)],
+      },
+      { readReceipt },
+    );
+    if (outcome.result.ok && outcome.sent !== null) {
+      p.events.record({
+        kind: 'chat_out',
+        id: outcome.result.message_id,
+        to: outcome.sent.to,
+        text: outcome.sent.text,
+        delivered: outcome.result.delivered,
+        undelivered: outcome.result.undelivered,
+      });
+      log.event('info', 'room-session', 'chat.sent', {
+        msg_id: outcome.result.message_id,
+        targets: outcome.sent.targets,
+        delivered: outcome.result.delivered.length,
+        undelivered: outcome.result.undelivered.length,
+        bytes: outcome.sent.bytes,
+        // ack 가 오지 않은 것은 실패 확정이 아니라 결과 불명이다.
+        outcome: outcome.result.undelivered.some((entry) => entry.reason === 'ack_timeout') ? 'unknown' : 'ok',
+      });
+    }
+    return outcome;
+  };
+
   const reject = (p: Parts, tool: string, failure: { readonly code: SessionFailure['code']; readonly detail: string }): SessionFailure => {
     // INVALID_ARGUMENT 는 규칙 거절이 아니다. 기록 파일의 rule 줄에 남기지 않는다.
     if (failure.code !== 'INVALID_ARGUMENT') {
@@ -750,6 +922,7 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
   const command = (input: SessionCommand): SessionResult<CommandOutputs[keyof CommandOutputs]> => {
     const p = parts;
     if (p === null || stage !== 'in') return { ok: false, code: 'NOT_IN_ROOM' };
+    if (observing) return OBSERVING;
     const missing = (): SessionFailure => ({ ok: false, code: 'INVALID_ARGUMENT', detail: 'the state module did not return the written record' });
 
     switch (input.type) {
@@ -759,6 +932,11 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
         if (input.role !== undefined) patch.role = input.role;
         if (input.tools !== undefined) patch.tools = input.tools;
         if (input.note !== undefined) patch.note = input.note;
+        // 듣지 않는다는 알림은 유예와 최소 간격을 기다리지 않고 지금 값을 바로 쓴다(부르는 쪽이 먼저 pauseListening 을 불렀다).
+        if (input.listening !== undefined) {
+          patch.listening = inbox.listening();
+          lastListeningWrite = now();
+        }
         const written = p.p2p.applyLocal({ type: 'set_presence', patch });
         if (!written.result.ok) return reject(p, input.type, written.result);
         const mine = ownPresence(p.replica.view(now()));
@@ -875,8 +1053,8 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
     async leave() {
       const p = requireParts();
       const running = (async (): Promise<RoomLeft> => {
-        // presence{left} 를 변경으로 보낸 뒤 bye{leave} 를 보낸다.
-        writePresence(p, { status: 'left' });
+        // presence{left} 를 변경으로 보낸 뒤 bye{leave} 를 보낸다. 관전자는 presence 를 쓰지 않는다.
+        if (!observing) writePresence(p, { status: 'left' });
         const path = p.events.transcriptPath();
         await teardown(p, 'leave', 'leave');
         return { left: true, transcript_path: path, undelivered_events: inbox.discardAll() };
@@ -916,7 +1094,7 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
           stage = 'closing';
           detach(p);
           p.chat.close();
-          writePresenceQuietly(p);
+          if (!observing) writePresenceQuietly(p);
           p.p2p.byeAll('shutdown');
           p.gate.discard();
           await within(() => p.client.leave());
@@ -935,33 +1113,61 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
     async sendChat(args) {
       const p = parts;
       if (p === null || stage !== 'in') return { ok: false, code: 'NOT_IN_ROOM' };
-      const open = syncedPeers(p);
-      const others = participants(p, p.replica.view(now()));
-      const outcome = await p.chat.send(args, {
-        open,
-        absent: p.keeper.members().filter((peer) => !open.includes(peer)),
-        known: others.map((other) => other.name),
-      });
-      if (outcome.result.ok && outcome.sent !== null) {
-        p.events.record({
-          kind: 'chat_out',
-          id: outcome.result.message_id,
-          to: outcome.sent.to,
-          text: outcome.sent.text,
-          delivered: outcome.result.delivered,
-          undelivered: outcome.result.undelivered,
-        });
-        log.event('info', 'room-session', 'chat.sent', {
-          msg_id: outcome.result.message_id,
-          targets: outcome.sent.targets,
-          delivered: outcome.result.delivered.length,
-          undelivered: outcome.result.undelivered.length,
-          bytes: outcome.sent.bytes,
-          // ack 가 오지 않은 것은 실패 확정이 아니라 결과 불명이다.
-          outcome: outcome.result.undelivered.some((entry) => entry.reason === 'ack_timeout') ? 'unknown' : 'ok',
-        });
+      // 관전자도 글은 보낸다(사람이 관전 콘솔에서 에이전트들에게 지시한다). 공유 상태에는 여전히 쓰지 않는다.
+      const outcome = await deliverChat(p, args, false);
+      if (!outcome.result.ok || parts !== p) return outcome.result;
+      // 전달은 됐어도 그 에이전트가 듣지 않으면 답이 늦는다. 보내는 쪽이 같은 결과에서 안다.
+      const recipients = [...outcome.result.delivered, ...outcome.result.undelivered.map((entry) => entry.name)];
+      const notListening = notListeningOf(p, recipients);
+      return notListening.length === 0 ? outcome.result : { ...outcome.result, not_listening: notListening };
+    },
+
+    async ping(args) {
+      const p = parts;
+      if (p === null || stage !== 'in') return { ok: false, code: 'NOT_IN_ROOM' };
+      if (observing) return OBSERVING;
+      const names = participants(p, p.replica.view(now()))
+        .filter((other) => other.status !== 'left' && other.shown_as !== 'left')
+        .map((other) => other.name);
+      if (names.length === 0) {
+        return { ok: false, code: 'INVALID_ARGUMENT', detail: 'there is no other participant in the room to check' };
       }
-      return outcome.result;
+      const outcome = await deliverChat(p, { text: pingText(name), to: names }, true);
+      if (!outcome.result.ok) return outcome.result;
+      const sent = outcome.result;
+      const timing = outcome.timing ?? { sentAt: now(), ackedAt: new Map<string, number>() };
+      const listeningOf = (peer: string): boolean | null =>
+        p.replica.view(now()).presences.find((presence) => presence.peer === peer)?.listening ?? null;
+      // 듣는 중인 수신자의 읽음 확인만 기다린다. 듣지 않는 쪽은 기다려도 오지 않는다(그 사이에 오면 같이 싣는다).
+      const awaited = sent.delivered.filter((peer) => listeningOf(peer) !== false);
+      const reads = await p.chat.awaitReads(sent.message_id, awaited, args.timeoutMs);
+      if (parts !== p || stage !== 'in') return CANCELLED;
+      const failedReason = new Map(sent.undelivered.map((entry) => [entry.name, entry.reason]));
+      const results: PingPeer[] = names.map((peer) => {
+        const ackedAt = timing.ackedAt.get(peer);
+        const readAt = reads.get(peer);
+        const listening = listeningOf(peer);
+        const deliveredMs = ackedAt === undefined ? null : Math.max(0, ackedAt - timing.sentAt);
+        const readMs = readAt === undefined ? null : Math.max(0, readAt - timing.sentAt);
+        const outcomeOf = (): PingPeer['outcome'] => {
+          if (readMs !== null) return 'read';
+          if (failedReason.get(peer) === 'not_connected') return 'not_connected';
+          if (deliveredMs === null) return 'no_ack';
+          return listening === false ? 'not_listening' : 'not_read';
+        };
+        return { name: peer, outcome: outcomeOf(), delivered_ms: deliveredMs, read_ms: readMs, listening };
+      });
+      const notListening = notListeningOf(
+        p,
+        results.filter((entry) => entry.outcome === 'not_listening').map((entry) => entry.name),
+      );
+      log.event('info', 'room-session', 'chat.ping', {
+        msg_id: sent.message_id,
+        targets: names.length,
+        read: results.filter((entry) => entry.outcome === 'read').length,
+        not_listening: notListening.length,
+      });
+      return { ok: true, message_id: sent.message_id, participants: results, not_listening: notListening };
     },
 
     command,
@@ -980,9 +1186,31 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
           net: { stun: params.iceServers.length > 0, srflx_seen: p.mesh.netInfo().srflx_seen },
         },
         participants: others,
+        observers: observersOf(p),
         test: testStatus(view.test, view.scenarios, at),
         claims: claimCounts(view.claims, params.selfNames),
         warnings: warningsOf(p, others),
+      };
+    },
+
+    observed() {
+      const p = requireParts();
+      const at = now();
+      const view = p.replica.view(at);
+      return {
+        server: params.server.serverKey,
+        name,
+        signaling: signaling.state,
+        participants: participants(p, view),
+        observers: observersOf(p),
+        unaware: p.p2p
+          .links()
+          .filter((link) => link.helloReceived && link.observer === null && !p.observers.has(link.peer))
+          .map((link) => link.peer)
+          .sort(),
+        test: testStatus(view.test, view.scenarios, at),
+        scenarios: observedScenarios(view.scenarios, at),
+        claims: observedClaims(view.claims, at),
       };
     },
 
@@ -1005,6 +1233,7 @@ export function createRoom(deps: RoomSessionDeps, params: RoomParams): Room {
     async writeReport() {
       const p = parts;
       if (p === null || stage !== 'in') return { ok: false, code: 'NOT_IN_ROOM' };
+      if (observing) return OBSERVING;
       const view = p.replica.view(now());
       if (view.test === null) {
         p.events.ruleRejected('write_report', 'NO_ACTIVE_TEST', null);

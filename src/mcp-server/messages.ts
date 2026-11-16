@@ -100,6 +100,17 @@ export interface EnterHintInput {
   readonly created: boolean;
 }
 
+/**
+ * 턴을 끝내지 않고 듣기를 이어 가라는 한 줄(개선안 P3). 에이전트는 instructions 보다 바로 앞의 tool 결과를 더 잘 따른다.
+ * poll 모드에서 턴을 끝내면 아무도 이 에이전트를 깨울 수 없다(mcp-interface.md 7.2).
+ */
+export const KEEP_LISTENING =
+  'Keep listening in this same turn. While you are in the room, keep checking messages and working with the others on your user\'s request until your user explicitly tells you to leave the room. Telling your user about progress, finishing a task, write_report and notice.test_stopped are not reasons to end your turn. Write to your user, then call wait_for_messages again.';
+
+/** 턴을 끝낼 수밖에 없을 때 사용자에게 할 말과 그 전에 할 일. */
+export const STOP_LISTENING_ADVICE =
+  'If you must end your turn anyway (your user explicitly gave you other work), first call set_status with listening=false so the room knows at once, then tell your user: "I am no longer listening to the room. To resume, tell me: wait for room messages again."';
+
 /** create_room·join_room 결과의 hint. 두 수신 경로를 안내한다(mcp-interface.md 7.1). */
 export function enterHint(input: EnterHintInput): string {
   const parts: string[] = [];
@@ -122,15 +133,47 @@ export function enterHint(input: EnterHintInput): string {
   } else {
     parts.push('Receiving: call wait_for_messages now and keep calling it with next_cursor.');
   }
+  // channel 모드는 호스트가 사건을 넣어 준다. poll 은 턴을 끝내면 받기가 멈춘다.
+  if (input.deliveryMode === 'poll') parts.push(KEEP_LISTENING);
   return parts.join(' ');
 }
 
 export const WAIT_HINTS = Object.freeze({
-  timeout: 'No events yet. This is normal: call wait_for_messages again with next_cursor.',
+  timeout: `No events yet. This is normal: call wait_for_messages again with next_cursor. ${KEEP_LISTENING}`,
   channel_mode:
     'Channel mode: do not wait here. Room events arrive as channel blocks. After handling them, call wait_for_messages once with the cursor of the last block you saw.',
   more: 'More events are waiting. Call wait_for_messages again right away with next_cursor.',
 });
+
+/** send_message 의 수신자 가운데 듣지 않는 참가자가 있을 때(개선안 P1). */
+export function notListeningHint(names: readonly string[]): string {
+  return (
+    `Delivered, but the agent of ${names.join(', ')} is not listening now (since: not_listening[].since). ` +
+    'Its process stored the message; the agent reads it only when it waits for room messages again, which may need its own user. ' +
+    'Expect a late reply. Keep waiting, and tell your user if none comes.'
+  );
+}
+
+/** set_status{listening: false} 의 결과. */
+export const PAUSED_HINT =
+  'The room now sees you as not listening. Tell your user: "I am no longer listening to the room. To resume, tell me: wait for room messages again." Calling wait_for_messages resumes listening.';
+
+/** ping_room 결과의 hint. 결과마다 무엇을 할지 짧게 안내한다. */
+export function pingHint(counts: { readonly read: number; readonly notListening: number; readonly other: number }): string {
+  const parts = [
+    'read: that agent took the check message (read_ms after sending). delivered_ms is when its process stored it.',
+  ];
+  if (counts.notListening > 0) {
+    parts.push('not_listening: delivered, but that agent is not waiting for room messages; its user has to have it wait again.');
+  }
+  if (counts.other > 0) {
+    parts.push(
+      'not_read: delivered and listening, but not read in time (busy, or an older Agent Chat without read receipts). no_ack / not_connected: the message itself may not have arrived.',
+    );
+  }
+  parts.push('The check message needs no reply. Continue with wait_for_messages.');
+  return parts.join(' ');
+}
 
 export const CONFIRM_REJECTED_MESSAGE =
   'Unknown channel check token. The delivery mode did not change. Use the token from the most recent channel block with kind="probe".';

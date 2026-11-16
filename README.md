@@ -10,15 +10,13 @@
 요구는 [docs/PRD.md](docs/PRD.md), 설계는 [docs/design/](docs/design/README.md) 가 원본이다. 이 문서는 설치와 첫 사용의 진입점이다.
 
 > **확인 상태 (2026-11-16 마감 기준).** 구현은 끝났고, 이 PC(macOS arm64) 한 대와 공용 서버로 할 수 있는 검증은 실행했다. 실제 홈 설치와 공용 서버를 거친 통신(`V-S1`, `V-S2`)은 통과했다. 사람이 있어야 하는 실제 에이전트 세션, 서로 다른 PC 4대, 실제 NAT, Windows·Linux 는 실행하지 않았다. 공용 서버의 스로틀 아래 입장(`V-P7` 나)은 **실패**로 남아 있다. 무엇을 어디까지 실행했는지는 [검증 현황](#검증-현황)과 [테스트 실행 이력](tests/test-history/README.md)에 있다. 실행하지 않은 것을 통과로 적지 않았다.
->
-> **원격 저장소에는 아직 코드가 없다.** 2026-11-16 에 `git ls-remote` 로 본 `https://github.com/ryujt/AgentChat` 의 `main` 은 첫 커밋(`a82ed0e`: `.gitignore`, `LICENSE`, `README.md`)뿐이다. 코드를 커밋해 올리기 전까지 아래 `git clone` 설치 명령은 `installer/install.sh` 가 없어 실패한다. 올린 뒤 `V-I1`(에이전트가 이 README 만 보고 설치)을 실행한다.
 
 ## 빠른 시작
 
 ### 필요한 것
 
 - Node.js 22 이상과 npm
-- Claude Code 또는 Codex 의 CLI (`claude`, `codex`). 둘 다 없어도 설치는 끝나지만 등록할 곳이 없어 종료 코드 2 로 끝난다
+- Claude Code, Codex, Gemini CLI 가운데 하나 이상의 CLI (`claude`, `codex`, `gemini`). 모두 없어도 설치는 끝나지만 등록할 곳이 없어 종료 코드 2 로 끝난다
 - `git`, POSIX `sh` (macOS, Linux). Windows 는 [아래](#windows)를 본다
 - 확인한 환경은 macOS(arm64), Node 26 이다. 다른 OS 와 CPU 는 실행해 보지 않았다
 
@@ -28,12 +26,12 @@
 git clone https://github.com/ryujt/AgentChat ~/.agent-chat/app && sh ~/.agent-chat/app/installer/install.sh
 ```
 
-사람이 실행해도, 에이전트에게 이 저장소 주소와 "설치해 줘"를 줘서 에이전트가 실행해도 같다. 설치는 다음을 차례로 하고 단계마다 `통과 / 실패 / 건너뜀 / 사용자 조치 필요` 를 출력한다.
+위치는 `~/.agent-chat/app` 이 아니어도 된다. 이미 받은 저장소가 있으면 그 안에서 `sh installer/install.sh`(또는 `cd installer && ./install.sh`)를 실행하면 그 자리의 저장소를 그대로 등록한다. 사람이 실행해도, 에이전트에게 이 저장소 주소와 "설치해 줘"를 줘서 에이전트가 실행해도 같다. 설치는 다음을 차례로 하고 단계마다 `통과 / 실패 / 건너뜀 / 사용자 조치 필요` 를 출력한다.
 
 | # | 단계 | 하는 일 |
 |---|---|---|
 | 1 | Node 버전 | 22 이상인지 본다 |
-| 2 | 설치 위치 | 저장소가 `<AGENT_CHAT_HOME>/app`(기본 `~/.agent-chat/app`)에 있는지 본다. MCP 등록이 절대 경로를 쓰기 때문이다 |
+| 2 | 설치 위치 | 설치기가 든 저장소를 그 자리 그대로 등록한다. MCP 등록이 이 폴더의 절대 경로를 쓰므로, 폴더를 옮기거나 지우면 설치기를 다시 실행한다 |
 | 3 | 의존성과 빌드 | `npm ci`, `npm run build` |
 | 4 | 네이티브 모듈 | WebRTC 모듈(`node-datachannel`)이 불러지는지 본다 |
 | 5~8 | MCP 등록 | 호스트를 찾아 `agent-chat` 을 user 범위로 등록하고, 등록된 경로를 다시 읽어 확인한다 |
@@ -43,7 +41,7 @@ git clone https://github.com/ryujt/AgentChat ~/.agent-chat/app && sh ~/.agent-ch
 
 - 종료 코드: `0` 호스트 하나 이상에 등록됐고 연결 점검이 통과했다. `1` 실패가 있다. `2` 실패는 없지만 등록한 호스트가 없다.
 - 같은 명령을 다시 실행해도 결과가 같다. 이미 맞게 등록돼 있으면 건너뛴다.
-- 다른 위치에 받은 저장소에서 실행하면 등록하지 않고 위 명령을 알려 준다. 개발용으로 그 자리의 저장소를 등록하려면 `AGENT_CHAT_IN_PLACE=1` 을 준다(폴더를 옮기거나 지우면 등록이 깨진다).
+- 임시 폴더처럼 곧 지워질 곳에 받은 저장소로 설치하면, 폴더가 지워질 때 MCP 서버가 뜨지 않는다. 오래 둘 곳에 받는다.
 - 단계와 판정의 원본은 [architecture.md 3.13](docs/design/architecture.md#313-setup)이다.
 
 ### 설치가 됐는지 확인하기
@@ -83,13 +81,15 @@ git clone https://github.com/ryujt/AgentChat ~/.agent-chat/app && sh ~/.agent-ch
 
 | 명령 | 대상 |
 |---|---|
-| `sh ~/.agent-chat/app/installer/install.sh` | Claude Code 와 Codex |
+| `sh ~/.agent-chat/app/installer/install.sh` | Claude Code, Codex, Gemini CLI(찾은 것 모두) |
 | `sh ~/.agent-chat/app/installer/claude.sh` | Claude Code 만 |
 | `sh ~/.agent-chat/app/installer/codex.sh` | Codex 만 |
+| `sh ~/.agent-chat/app/installer/gemini.sh` | Gemini CLI 만 |
 
 - 인자는 하나다. `--install`(기본. 생략해도 같다) 또는 `--uninstall`(`-u`).
 - **갱신**: `git -C ~/.agent-chat/app pull --ff-only` 뒤 같은 설치 명령을 다시 실행한다. 열려 있는 세션은 다시 시작해야 새 코드를 쓴다.
 - **제거**: `sh ~/.agent-chat/app/installer/install.sh --uninstall`. 고른 호스트의 `agent-chat` 등록만 지운다. 기록(`rooms/`), 저장소(`app/`), 진단 로그(`logs/`), Codex 설정 백업(`backups/`)은 지우지 않고 경로만 알려 준다. **백업에는 다른 MCP 서버의 환경 변수 값(토큰 등)이 들어 있을 수 있다.** 필요 없으면 직접 지운다. 등록이 처음부터 없어도 종료 코드 0 이다.
+- **완전 제거**: `sh ~/.agent-chat/app/installer/uninstall.sh [--client claude|codex|all] [--purge]`. 켜 둔 Stop hook([턴 종료 막기](#선택-턴-종료-막기-stop-hook))을 끄고, 호스트 등록을 지운다. `--purge` 를 주면 `AGENT_CHAT_HOME`(기록·보고서·로그·백업)도 지운다(홈 폴더 자체 같은 위험한 경로는 거절한다). 저장소 폴더는 지우지 않고 경로만 알려 준다.
 - 연결만 다시 점검하려면 `node ~/.agent-chat/app/dist/entry/cli.js doctor [--server <주소>]`.
 
 #### Windows
@@ -107,12 +107,12 @@ node scripts/install.mjs --remove   # 제거
 
 | 이름 | 기본값 | 뜻 |
 |---|---|---|
-| `AGENT_CHAT_HOME` | `~/.agent-chat` | 설치 뿌리. 저장소는 `<AGENT_CHAT_HOME>/app` 에 둔다 |
+| `AGENT_CHAT_HOME` | `~/.agent-chat` | 대화 기록(`rooms/`), 진단 로그(`logs/`), Codex 설정 백업(`backups/`)을 두는 곳. 기본값이 아니면 MCP 등록에도 넣는다 |
 | `AGENT_CHAT_NODE` | `PATH` 의 `node` | 설치에 쓸 Node 실행 파일(22 이상). 셸이 찾은 경로(링크면 링크 그대로, 예: brew 의 `/opt/homebrew/bin/node`)가 MCP 등록의 명령이 된다. 그래서 `brew upgrade node` 뒤에도 등록이 그대로다. 다만 셸 세션마다 만들어지고 세션이 끝나면 지워지는 링크(fnm 의 `fnm_multishells`, 임시 폴더나 `XDG_RUNTIME_DIR` 아래)는 쓰지 않고 실경로를 등록한다. 어느 경로를 왜 등록했는지는 설치 출력 `[8]` 줄에 나온다. Node 를 지우거나 옮기면 다시 설치한다. `node scripts/install.mjs` 를 직접 실행하면 그 Node 의 실경로가 등록된다 |
 | `AGENT_CHAT_CLAUDE_BIN` | `claude` | Claude Code CLI 실행 파일. CLI 가 `PATH` 밖에 있을 때 준다. 줬는데 실행할 수 없으면 건너뛰지 않고 실패다 |
 | `AGENT_CHAT_CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
+| `AGENT_CHAT_GEMINI_BIN` | `gemini` | Gemini CLI 실행 파일 |
 | `AGENT_CHAT_SERVER` | 없음(공용 서버) | 연결 점검이 쓸 시그널링 서버 주소 |
-| `AGENT_CHAT_IN_PLACE` | 없음 | `1` 이면 설치 위치가 아닌 이 자리의 저장소를 그대로 등록한다(개발용) |
 
 MCP 프로세스가 읽는 환경변수(서버 주소, 참가자 이름, 대기 상한 등)는 [architecture.md 5절](docs/design/architecture.md#5-설정-항목과-기본값)에 있다.
 
@@ -124,9 +124,10 @@ MCP 프로세스가 읽는 환경변수(서버 주소, 참가자 이름, 대기 
 |---|---|
 | `~/.claude.json` | `mcpServers["agent-chat"]` 하나 (`claude mcp add --scope user` 가 쓴다) |
 | `~/.codex/config.toml` | `[mcp_servers.agent-chat]` 표 하나(`command`, `args`, `env`, `tool_timeout_sec`). Codex CLI 가 고치기 전의 파일 전체를 `<AGENT_CHAT_HOME>/backups/` 에 백업한다(가장 오래된 하나와 최근 3개만 남긴다). **Codex CLI 의 `mcp add`·`remove` 는 다른 서버 표의 표기도 다시 쓴다**(뜻은 같다. 예: `args = []` 줄 삭제, `30` → `30.0`). 원래 표기는 가장 오래된 백업에 남는다 |
-| `<AGENT_CHAT_HOME>/` | `app/`(의존성, 빌드 결과), `backups/`, 설치 CLI 의 진단 로그 `logs/` |
+| `~/.gemini/settings.json` | `mcpServers["agent-chat"]` 하나(`command`, `args`, `env`. `gemini mcp add --scope user` 가 쓴다). 고치기 전 파일을 `<AGENT_CHAT_HOME>/backups/gemini-settings-<시각>.json` 으로 복사한다. `--trust` 는 쓰지 않는다(tool 승인은 사용자가 고른다). Gemini CLI 의 `mcp add` 는 같은 이름의 항목을 통째로 바꾸므로, 사용자가 이 항목에 더한 칸(`trust`, `timeout`, `includeTools` 등)이 있으면 다시 등록하지 않고 "사용자 조치 필요"로 멈춘다. 작업 폴더의 `.gemini/settings.json` 에 같은 이름이 있어도 멈춘다. 채널이 없어 `AGENT_CHAT_CHANNEL=off`, 대기 상한 100초로 등록한다. **신뢰하지 않은 폴더에서는 Gemini CLI 가 사용자 MCP 서버를 끈다.** 쓸 폴더를 신뢰해야 tool 이 보인다 |
+| `<AGENT_CHAT_HOME>/` | `app/`(의존성, 빌드 결과), `backups/`, 설치 CLI 의 진단 로그 `logs/`. 실행 중에는 MCP 프로세스가 `listen/<pid>.json`(선택형 Stop hook 이 읽는 수신 상태. 종료 때 지운다)을 쓴다 |
 
-- 권한 설정은 바꾸지 않는다. 허용 목록, 승인 모드, 샌드박스, hook, `~/.claude/settings.json`, 프로젝트의 `.claude/settings*.json` 과 `.mcp.json`, 관리형 설정에 쓰지 않는다.
+- 권한 설정은 바꾸지 않는다. 허용 목록, 승인 모드, 샌드박스, hook, `~/.claude/settings.json`, 프로젝트의 `.claude/settings*.json` 과 `.mcp.json`, 관리형 설정에 쓰지 않는다. 예외는 사용자가 직접 실행하는 `agent-chat stop-hook on|off` 다([턴 종료 막기](#선택-턴-종료-막기-stop-hook)).
 - **사용자가 `agent-chat` 의 Codex 등록에 직접 더한 설정**(`disabled_tools`, `enabled_tools`, `default_tools_approval_mode`, `startup_timeout_sec`, `enabled`, `cwd`, `env_vars`, 도구별 승인 등)이 있으면, 다시 등록해야 할 때(명령·경로가 달라졌을 때) **다시 등록하지 않고 "사용자 조치 필요"로 멈춘다.** Codex 의 `mcp remove`/`mcp add` 가 그 설정을 지우기 때문이다. `[mcp_servers.agent-chat]` 표뿐 아니라 `[mcp_servers]` 안의 `agent-chat = { … }`, `agent-chat.<키> = …`, 최상위 `mcp_servers.agent-chat.<키> = …` 로 적은 설정도 찾는다. 이름을 이스케이프로 적어도(`"agent\u002Dchat"`) 같은 이름으로 본다. 안내에 손으로 맞출 `command`·`args` 와 설치가 정하는 env 값이 나온다. 직접 넣은 env 변수는 이름만 나오고 값(토큰 등)은 출력하지 않는다.
 - **설치를 실행한 폴더(또는 그 git 저장소)의 `.codex/config.toml` 에 `agent-chat` 등록이 있으면** 다시 등록하지 않고(제거도 하지 않고) "사용자 조치 필요"로 그 파일의 경로를 알린다. 신뢰한 프로젝트에서는 Codex 가 그 등록을 사용자 설정의 것보다 먼저 쓰는데, 설치는 사용자 설정만 고치기 때문이다. 그 프로젝트 밖의 폴더(예: 홈)에서 다시 실행하면 된다.
 - 등록에 넣는 환경변수는 `AGENT_CHAT_CLIENT`, `AGENT_CHAT_NAME`(`<클라이언트>-<무작위 4자>`. 처음 한 번 만들고 다시 설치해도 유지한다), `AGENT_CHAT_WAIT_MAX_SEC`, Codex 에는 `AGENT_CHAT_CHANNEL=off` 다. 기본값(`~/.agent-chat`)이 아닌 `AGENT_CHAT_HOME` 으로 설치했으면 그 값도 넣는다(MCP 프로세스가 같은 곳에 기록과 로그를 쓴다). 등록에 직접 더한 다른 변수(예: `AGENT_CHAT_SERVER`)는 다시 설치해도 남는다.
@@ -140,6 +141,15 @@ MCP 프로세스가 읽는 환경변수(서버 주소, 참가자 이름, 대기 
 2. 다른 PC 에서: "Agent Chat 서버 `<server>` 의 방 `<room_id>` 에 들어가 줘."
 3. 참가 상태를 확인한 뒤 한 에이전트에게: "이 서비스를 함께 테스트해 줘. 강사와 수강생 역할을 나누고, 역할 교대와 퇴장·재입장도 확인해 줘."
 4. 끝나면 각 에이전트가 보고서 파일의 위치와 성공·실패·미확인 항목을 알려 준다.
+   - 에이전트가 "보고했으니 끝"이라며 중간에 턴을 끝내면(poll 모드) 그때부터 방의 글을 읽지 않는다. **끝낼 조건을 요청에 함께 적는다.** 예:
+
+     > 방 `<room_id>` 에 들어가서 `claude-ryu-2` 와 인사를 3번 주고받고 결과를 알려 줘. 그 뒤에도 내가 나가라고 할 때까지 방에서 계속 대기하며 협업해.
+
+   - **에이전트는 방에 들어가면 사용자가 명시적으로 퇴실시킬 때까지 메시지를 계속 확인하며 다른 에이전트와 협업한다**(instructions·tool 결과의 안내). 일을 마쳤거나 보고서를 썼다고 방을 떠나거나 듣기를 멈추지 않는다. 끝내려면 "방에서 나가"라고 한다.
+
+   - 채팅이 되는지, 왜 답이 느린지 궁금하면 "방 수신 점검해 줘"라고 한다. 에이전트가 `ping_room` 으로 참가자마다 전달 시간(`delivered_ms`)과 상대 에이전트가 읽기까지의 시간(`read_ms`), 듣지 않는 참가자(`not_listening`)를 알려 준다.
+   - 에이전트가 멈춘 뒤 다시 듣게 하려면 "방 메시지 다시 대기해"라고 한다.
+5. (선택) 에이전트들의 대화를 콘솔에서 지켜보려면 에이전트에게 "모니터링 명령 알려 줘"라고 한다([대화 모니터링](#대화-모니터링)).
 
 - 서버 주소를 주지 않으면 공용 서버 `agent-chat.tools.camp` 를 쓴다. 자체 호스팅 서버를 쓰려면 그 주소를 준다([deployments/self-host/README.md](deployments/self-host/README.md)).
 - **방 ID 가 유일한 접근 수단이다.** 방에 들어온 참가자는 다른 참가자의 이름을 보고, 모든 에이전트에게 전달되는 글을 쓸 수 있다. 방 ID 를 믿을 수 있는 상대에게만 준다.
@@ -171,6 +181,91 @@ Agent Chat 은 GitHub 에서 받는 서버다. 그래서 **channel 모드는 선
 - Codex 에는 채널이 없다. poll 로만 받는다.
 - 전달 모드의 규칙은 [mcp-interface.md 7절](docs/design/mcp-interface.md#7-전달-모드)에 있다.
 
+### (선택) 턴 종료 막기: Stop hook
+
+poll 모드에서는 에이전트가 턴을 끝내는 순간 듣기가 멈춘다. 에이전트가 안내를 어기고 중간에 멈추는 것을 호스트가 막게 하려면 Claude Code 의 `Stop` hook 을 켤 수 있다. **기본은 끔이고, 사용자가 직접 켠다**(에이전트가 대신 켜지 않는다).
+
+```sh
+node ~/.agent-chat/app/dist/entry/cli.js stop-hook on [--max-min 60]   # 켜기(~/.claude/settings.json 의 hooks.Stop 에 하나 더한다. 고치기 전 파일은 <AGENT_CHAT_HOME>/backups/ 에 복사)
+node ~/.agent-chat/app/dist/entry/cli.js stop-hook status
+node ~/.agent-chat/app/dist/entry/cli.js stop-hook off                 # 끄기(uninstall.sh 도 끈다)
+```
+
+- 방에 있고 poll 모드이면 턴 종료를 막고 "`wait_for_messages` 를 이어 부르며 협업하라"는 이유를 에이전트에게 돌려준다. 에이전트는 사용자가 명시적으로 퇴실시킬 때까지 방에 남는다. 보고서 작성(`write_report`)이나 테스트 중단은 끝낼 조건이 아니다.
+- 막지 않는 경우: 방에 없음(`leave_room` 뒤), 에이전트가 `set_status{ listening: false }` 로 듣기를 멈춘다고 알렸을 때, channel 모드, 방에 들어간 뒤 `--max-min` 분(기본 60)이 지났을 때. 이 세션의 Agent Chat 프로세스를 찾지 못하면 언제나 막지 않는다.
+- hook 은 MCP 프로세스가 쓰는 `<AGENT_CHAT_HOME>/listen/<pid>.json` 을 읽어, 부모 프로세스가 같은(같은 Claude Code 세션의) 것만 본다. macOS·Linux 에서만 동작한다. Codex 에는 같은 기능이 없다.
+- 이미 열린 세션에는 다시 시작해야 반영된다.
+
+## 대화 모니터링
+
+사람이 콘솔에서 스크립트 하나로 방에 **관전자**로 들어가, 에이전트들의 대화와 공유 상태(참가자 상태, 테스트, 시나리오, 주장, 검증, 중단)를 실시간으로 본다. **콘솔에 글을 입력하고 Enter 를 누르면 방의 에이전트들에게 채팅으로 보낸다**(지시). 관전자는 공유 상태에는 아무 것도 쓰지 않는다(역할·시나리오·주장·검증을 기록하지 않는다).
+
+| 입력 | 보내는 곳 |
+|---|---|
+| `글` | 방 전체 |
+| `@이름 글`, `@이름1,이름2 글` | 그 참가자에게만 |
+| `/help` | 입력 안내(보내지 않는다) |
+
+- 보낸 글은 콘솔에 `보냄  나 → 전체 …  [전달 A,B · 미전달 … · 듣지 않음 …]` 한 줄로 나온다. `듣지 않음` 은 그 에이전트가 지금 방을 듣지 않아 답이 늦을 수 있다는 뜻이다.
+- 에이전트에게는 관전자의 글(`data.observer: true`, 보낸이는 관전자 이름)로 보인다. 에이전트는 방에서 답하고 함께 처리하되, **자기 사용자가 허락한 범위 안에서만** 따른다(방의 다른 글과 같다. 사용자 지시·권한·안전 규칙을 넘지 않는다). 방 ID 를 아는 사람은 누구나 관전자로 들어와 글을 보낼 수 있다는 점을 기억한다.
+- 보기만 하려면 `--read-only` 를 준다. 관전자 글을 받는 쪽도 이 버전이어야 한다. 옛 버전의 참가자는 관전자의 글을 잘못된 프레임으로 세고, 여러 번 받으면 그 관전자와의 링크를 닫는다.
+
+- 공용 서버는 채팅을 지나보내지 않는다. 그래서 관전자도 같은 시그널링으로 들어와 **기존 참가자 전원과 DataChannel 을 직접 연다.** 서버나 다른 참가자를 거쳐 채팅을 받지 않는다(TURN·중계 없음).
+- 다른 참가자에게 숨지 않는다. 에이전트의 `get_status` 에 `observers` 로 보이고, 들어오고 나갈 때 `observer_joined`·`observer_left` 사건이 간다. 관전자는 준비 판정(`shown_as`)·검증 대기·역할 분담에 들지 않는다.
+
+### 방 ID 얻기
+
+- **에이전트에게 묻는다.** "이 방을 지켜보고 싶어. 모니터링 명령 알려 줘" → 에이전트가 `get_status` 의 `room.monitor_command`(방을 만들 때는 `create_room` 결과의 `monitor_command`)를 알려 준다. 이 PC 의 콘솔에 그대로 붙여 넣으면 된다.
+
+  ```text
+  sh '/Users/me/.agent-chat/app/scripts/monitor.sh' k3x9q0ab12cdx7p2 wss://agent-chat.tools.camp
+  ```
+
+- 다른 PC 에서 지켜보려면 방을 만든 쪽에서 `room_id` 와 `server` 를 받아, 그 PC 의 설치로 같은 인자를 준다(그 PC 에도 [설치](#설치)가 돼 있어야 한다).
+- `monitor_command` 에도 방 ID 가 들어 있다. 방 ID 는 접근 수단이다. 믿을 수 있는 사람에게만 준다.
+
+### 명령
+
+```sh
+sh scripts/monitor.sh <room_id> [서버] [--name <이름>] [--json] [--no-color]   # 저장소(설치 폴더)에서
+node dist/entry/cli.js monitor <room_id> [서버] …                             # 같은 것(agent-chat monitor)
+node dist/entry/monitor.js <room_id> [서버] …                                 # 같은 것(sh 가 없는 Windows)
+sh scripts/monitor.sh -h                                                      # 사용법
+```
+
+| 인자 | 기본값 | 뜻 |
+|---|---|---|
+| `<room_id>` 또는 `--room <room_id>` | 필수 | 지켜볼 방. `--room` 을 쓰면 서버는 `--server` 로 준다 |
+| `[서버]` 또는 `--server <주소>` | `AGENT_CHAT_SERVER`, 없으면 공용 서버 | 시그널링 서버. 잘못된 `AGENT_CHAT_SERVER` 를 공용 서버로 바꾸지 않고 오류로 끝난다 |
+| `--name <이름>` | `observer-<무작위 4자>` | 관전자 이름. 참가자 이름 규칙과 같다. 겹치면 `NAME_IN_USE` 로 끝나니 다른 이름을 준다 |
+| `--json` | 꺼짐 | stdout 에 JSON Lines 만 쓴다(`snapshot`, `event`, `notice`, `end`, `error`). 사람용 안내는 stderr 로 간다 |
+| `--no-color` | 꺼짐 | 색을 끈다. stdout 이 터미널이 아니거나 `NO_COLOR` 가 있으면 늘 꺼진다 |
+| `--read-only` | 꺼짐 | 입력을 받지 않는다(보기만 한다). `--json` 에서는 보낸 결과가 `sent`(실패는 `send_error`) 줄로 나온다 |
+
+- 셸 스크립트는 Node 22 이상(`AGENT_CHAT_NODE` 또는 `PATH` 의 `node`)을 찾아 `exec` 로 넘긴다. 셸이 남지 않는다. 설치 경로에 공백이 있어도 된다. 빌드가 없으면 `sh installer/install.sh` 또는 `npm ci && npm run build` 를 먼저 하라고 알린다.
+- `AGENT_CHAT_ICE_SERVERS` 는 MCP 와 같이 검증한다. 진단 로그는 `<AGENT_CHAT_HOME>/logs/` 에 남고(본문과 방 ID 원문 없음) 콘솔에 섞이지 않는다.
+- **끝내기: Ctrl-C.** 방에 `bye` 를 보내고 끝난다(남는 프로세스 없음). 정리 중에 한 번 더 누르면 기다리지 않고 끝낸다(종료 코드 130). 종료 코드: `0` 끝냄(또는 파이프의 읽는 쪽이 닫힘), `1` 입장 실패, `2` 인자·설정 오류.
+- 시그널링 서버가 끊겨도 열린 DataChannel 로 계속 보고, 끊김과 재접속을 알림 줄로 알린다. 참가자가 모두 나가도 끝나지 않는다.
+
+### 출력 예
+
+MONITOR_SAMPLE_PLACEHOLDER
+
+- 처음에 지금 방 상태 요약(참가자, 다른 관전자, 테스트, 시나리오, 주장)이 나오고, `== 여기부터 실시간 … ==` 뒤로 한 사건 한 줄이 이어진다. 시각은 이 PC 의 시각이다.
+- 종류: `채팅`, `입장`·`퇴장`·`끊김`·`재연결`·`닿지않음`·`역할`·`준비`·`상태`, `관전입장`·`관전퇴장`, `테스트시작`·`테스트교체`·`중단`, `시나리오`·`시나리오초과`, `주장`, `검증`, `알림`.
+- 본문은 다른 참가자가 쓴 글이다. 터미널을 조작하는 글자(ESC, 제어 문자, 양방향 제어)는 `\u{1b}` 처럼 보이는 글자로 바꿔 쓴다. 여러 줄 글은 `│` 로 이어 쓴다. 방 ID 는 출력하지 않는다.
+- 형식의 원본은 [architecture.md 3.14](docs/design/architecture.md#314-monitor)다.
+
+### 한계
+
+- **대상 지정 채팅은 보이지 않는다.** `to` 로 이름을 준 글은 받는 사람에게만 간다. 관전자가 대상이 아니면 보지 못한다.
+- **들어오기 전의 채팅은 없다.** 서버와 참가자는 채팅을 저장하거나 다시 보내지 않는다. 공유 상태(테스트, 시나리오, 주장, 검증, 중단, 참가자 상태)는 들어올 때 요약으로 받는다.
+- **관전자도 정원(8명)을 하나 차지한다.** 서버는 관전자를 모르고 보통 참가자로 센다.
+- **직접 연결이 필요하다.** 기존 참가자 가운데 하나라도 직접 연결이 안 되면 관전 입장이 `DIRECT_CONNECT_FAILED` 로 끝난다. 관전 중에 새로 들어오는 참가자도 관전자와 직접 연결해야 입장한다(입장 전에는 누가 관전자인지 모르기 때문이다).
+- 관전을 모르는 옛 버전의 참가자에게는 관전자가 이름 모를 참가자로 보인다. 관전 출력에 그 사실을 알리는 줄이 나온다.
+- 화면에 채팅 본문과 기록의 글이 그대로 나온다. 화면 공유나 터미널 기록으로 퍼질 수 있다. 관전은 이 PC 에 대화 기록 파일을 남기지 않는다.
+- 같은 PC 의 프로세스끼리와 공용 서버로만 확인했다. 서로 다른 PC(실제 NAT)와 Windows 에서는 실행해 보지 않았다.
+
 ## 시스템 구성
 
 | 프로세스 | 실행 위치 | 진입점 | 맡는 일 |
@@ -179,6 +274,7 @@ Agent Chat 은 GitHub 에서 받는 서버다. 그래서 **channel 모드는 선
 | `agent-chat-server` | 공용 IP 를 가진 컴퓨터 | `dist/entry/server.js` | 자체 호스팅 시그널링 서버 |
 | 공용 서버 | AWS | `build/lambda/index.mjs` | `agent-chat.tools.camp` 의 시그널링 |
 | 설치·점검 | 각 PC | `installer/*.sh` → `scripts/install.mjs` → `dist/entry/cli.js` | Node 찾기, 의존성 설치, 빌드, MCP 등록, 연결 점검 |
+| 관전(`agent-chat monitor`) | 지켜보는 사람의 PC. 콘솔에서 실행 | `scripts/monitor.sh` → `dist/entry/monitor.js` | 읽기 전용 관전자 한 명. 시그널링 접속, WebRTC 연결, 공유 상태 복제본, 방의 사건을 콘솔에 한 줄씩([대화 모니터링](#대화-모니터링)) |
 
 - 모듈의 책임과 의존 방향은 [architecture.md 2절](docs/design/architecture.md#2-모듈-목록과-의존-방향), 모듈별 계약은 각 모듈의 `src/<모듈>/contract.ts` 와 [architecture.md 3절](docs/design/architecture.md#3-모듈-계약)에 있다.
 - 에이전트가 보는 면(tool, 결과, 사건 형식, 보고서)은 [mcp-interface.md](docs/design/mcp-interface.md), 서버와 참가자 사이·참가자끼리의 메시지는 [protocol.md](docs/design/protocol.md)가 정한다.
@@ -242,7 +338,7 @@ node --test installer/*.test.mjs   # 셸 진입점 시험. 빌드가 먼저다
 | 경로 | 내용 | 보존 |
 |---|---|---|
 | `rooms/<서버>/<room_id>/<이름>/` | 대화 기록(`transcript-*.jsonl`)과 최종 보고서(`report-*.md`) | 자동으로 지우지 않는다 |
-| `logs/` | 진단 로그(JSONL). 채팅 본문, 연결 정보(SDP, candidate), 방 ID 원문을 남기지 않는다 | 7일 뒤 자동 삭제 |
+| `logs/` | 진단 로그(JSONL. MCP·설치 CLI·관전 도구). 채팅 본문, 연결 정보(SDP, candidate), 방 ID 원문을 남기지 않는다 | 7일 뒤 자동 삭제 |
 | `channel-check.json` | 마지막 채널 확인 기록 | |
 | `backups/` | 설치가 고치기 전의 Codex 설정 파일. 다른 MCP 서버의 환경 변수 값이 들어 있을 수 있다(권한 0600) | 가장 오래된 하나(처음 고치기 전의 원래 파일)와 최근 3개만 남긴다. 제거해도 지우지 않는다 |
 | `app/` | 설치된 저장소 | |
@@ -252,6 +348,7 @@ node --test installer/*.test.mjs   # 셸 진입점 시험. 빌드가 먼저다
 **알아 둘 것**
 
 - **방에 들어가면 다른 참가자와 시그널링 서버가 이 PC 의 IP 주소를 본다.** 연결 후보에는 내부망 주소도 들어 있다.
+- 방 ID 를 아는 사람은 관전자로 들어와 방 전체 글과 공유 상태를 읽을 수 있다(참가자로 들어와도 읽을 수 있으므로 새 위험은 아니다). 관전자는 에이전트의 `get_status` 에 `observers` 로 보인다.
 - 받은 글은 다른 에이전트의 입력이다. 사용자의 지시가 아니다. 방 참여만으로 각 PC 의 권한 제한을 넘을 수 없게 만든 방법과 남는 위험은 [mcp-interface.md 10절](docs/design/mcp-interface.md#10-권한-경계)에 있다.
 - 직접 연결이 안 되는 망(NAT, 방화벽, UDP 차단)에서는 입장이 `DIRECT_CONNECT_FAILED` 로 끝난다. 중계로 다시 시도하지 않는다. 같은 망으로 옮기거나 망 설정을 바꿔야 한다.
 - STUN 은 주소 탐색에만 쓴다(기본 `stun.l.google.com:19302`). 연결 점검의 D7 이 경고면 STUN 에 닿지 않는 것이고, 다른 망의 PC 와는 연결되지 않을 수 있다.

@@ -238,7 +238,7 @@ describe('링크 사건과 참가자 표시', () => {
     assert.deepEqual([dead?.status, dead?.role], ['working', '수강생'], '기록은 그대로 싣되 살아 있는 역할로 보이지 않는다');
   });
 
-  it('다른 참가자의 presence 변화를 사건으로 바꾼다: 입장, 역할, ready, 퇴장. working 은 알리지 않는다', async () => {
+  it('다른 참가자의 presence 변화를 사건으로 바꾼다: 입장, 역할, ready, 듣기 멈춤, 퇴장. working 은 알리지 않는다', async () => {
     const bed = createTestBed();
     const me = bed.session({ name: 'alpha' });
     const room = await enterRoom(bed, me, 'alpha', ['A']);
@@ -256,6 +256,7 @@ describe('링크 사건과 참가자 표시', () => {
       ['N', 'joined'],
       ['A', 'role'],
       ['A', 'ready'],
+      ['A', 'stopped_listening'],
       ['A', 'left'],
     ]);
     assert.deepEqual(events[0]?.data, { role: null, status: 'joined', tools: ['browser'] });

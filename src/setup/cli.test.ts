@@ -8,8 +8,9 @@ import { createFakeHost, createFakeHub, createMemoryLog, realTimers } from './te
 
 describe('cli: 인자', () => {
   it('setup 은 --client 와 --remove 를 받는다. --client 를 생략하면 all 이다', () => {
-    assert.deepEqual(parseCliArgs(['setup']), { kind: 'setup', clients: ['claude', 'codex'], remove: false });
-    assert.deepEqual(parseCliArgs(['setup', '--client', 'all']), { kind: 'setup', clients: ['claude', 'codex'], remove: false });
+    assert.deepEqual(parseCliArgs(['setup']), { kind: 'setup', clients: ['claude', 'codex', 'gemini'], remove: false });
+    assert.deepEqual(parseCliArgs(['setup', '--client', 'gemini']), { kind: 'setup', clients: ['gemini'], remove: false });
+    assert.deepEqual(parseCliArgs(['setup', '--client', 'all']), { kind: 'setup', clients: ['claude', 'codex', 'gemini'], remove: false });
     assert.deepEqual(parseCliArgs(['setup', '--client', 'claude']), { kind: 'setup', clients: ['claude'], remove: false });
     assert.deepEqual(parseCliArgs(['setup', '--remove', '--client', 'codex']), { kind: 'setup', clients: ['codex'], remove: true });
   });
@@ -31,10 +32,11 @@ describe('cli: 설치기 환경 변수', () => {
     assert.deepEqual(readInstallerEnv({}, '/home/u', '/work'), {
       home: '/home/u/.agent-chat',
       homeIsDefault: true,
-      bins: { claude: { value: 'claude', explicit: false }, codex: { value: 'codex', explicit: false } },
+      bins: { claude: { value: 'claude', explicit: false }, codex: { value: 'codex', explicit: false }, gemini: { value: 'gemini', explicit: false } },
       server: null,
       providerFlags: [],
       codexConfigPath: '/home/u/.codex/config.toml',
+      geminiSettings: { user: '/home/u/.gemini/settings.json', project: '/work/.gemini/settings.json' },
       cwd: '/work',
     });
   });
@@ -55,6 +57,7 @@ describe('cli: 설치기 환경 변수', () => {
         CLAUDE_CODE_USE_VERTEX: '1',
         CLAUDE_CODE_USE_BEDROCK: '',
         CODEX_HOME: '/custom/codex',
+        AGENT_CHAT_GEMINI_BIN: '/opt/gemini',
       },
       '/home/u',
       '/work',
@@ -62,10 +65,15 @@ describe('cli: 설치기 환경 변수', () => {
     assert.deepEqual(env, {
       home: '/work/relative home',
       homeIsDefault: false,
-      bins: { claude: { value: '/opt/claude bin/claude', explicit: true }, codex: { value: 'codex', explicit: false } },
+      bins: {
+        claude: { value: '/opt/claude bin/claude', explicit: true },
+        codex: { value: 'codex', explicit: false },
+        gemini: { value: '/opt/gemini', explicit: true },
+      },
       server: 'ws://127.0.0.1:8787',
       providerFlags: ['CLAUDE_CODE_USE_VERTEX'],
       codexConfigPath: '/custom/codex/config.toml',
+      geminiSettings: { user: '/home/u/.gemini/settings.json', project: '/work/.gemini/settings.json' },
       cwd: '/work',
     });
   });

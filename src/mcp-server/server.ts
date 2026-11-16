@@ -10,6 +10,8 @@ import type { ChannelCheckWriter } from './channel-check.js';
 import { CHANNEL_CAPABILITY, CHANNEL_NOTIFICATION_METHOD, toChannelNotification } from './channel.js';
 import type { McpServerClosed, McpServerDeps, McpServerHandle, ShutdownCause, StartMcpServer, ToolName } from './contract.js';
 import { INSTRUCTIONS } from './instructions.js';
+import { createListenStateWriter } from './listen-state.js';
+import type { ListenStateWriter } from './listen-state.js';
 import { registerTools } from './tools.js';
 
 export interface McpApp {
@@ -17,6 +19,8 @@ export interface McpApp {
   /** 등록한 tool 이름. */
   readonly toolNames: readonly ToolName[];
   readonly channelCheck: ChannelCheckWriter;
+  /** 수신 상태 파일. deps.listenState 가 없으면 null. */
+  readonly listenState: ListenStateWriter | null;
   /** 종료가 시작됐다. 대기 중인 wait 을 끝내고, 이후의 tool 호출을 CANCELLED 로 돌려준다. */
   beginShutdown(): void;
 }
@@ -43,6 +47,31 @@ export function createMcpApp(deps: McpServerDeps): McpApp {
     log.event('warn', 'mcp-server', 'mcp.error', { error_code: error.name });
   };
 
+  // 선택형 Stop hook 이 읽는 수신 상태 파일(개선안 P5). 조립이 프로세스 번호를 줄 때만 쓴다.
+  const listenState =
+    deps.listenState === undefined || deps.listenState === null
+      ? null
+      : createListenStateWriter({ home: config.session.home, ...deps.listenState, now: deps.now, log });
+  let enteredAt: string | null = null;
+  let reportWritten = false;
+  const syncListenState = (): void => {
+    if (listenState === null) return;
+    const notice = deps.session.notice();
+    listenState.update({
+      in_room: notice !== null,
+      delivery_mode: inbox.mode(),
+      listening: inbox.listening(),
+      paused: inbox.paused(),
+      report_written: reportWritten,
+      test_stopped: notice?.test_stopped !== undefined,
+      entered_at: notice === null ? null : enteredAt,
+    });
+  };
+  if (listenState !== null) {
+    inbox.on('listening-changed', syncListenState);
+    inbox.on('mode-changed', syncListenState);
+  }
+
   const registered = registerTools(mcp, {
     session: deps.session,
     inbox,
@@ -51,6 +80,17 @@ export function createMcpApp(deps: McpServerDeps): McpApp {
     now: deps.now,
     log,
     shutdownSignal: shutdownController.signal,
+    monitorLauncher: deps.monitorLauncher ?? null,
+    onToolDone: (name, ok) => {
+      if (listenState === null) return;
+      if (ok && (name === 'create_room' || name === 'join_room')) {
+        enteredAt = new Date(deps.now()).toISOString();
+        reportWritten = false;
+      }
+      if (ok && name === 'write_report') reportWritten = true;
+      if (ok && name === 'leave_room') enteredAt = null;
+      syncListenState();
+    },
   });
 
   const channelCheck = createChannelCheckWriter({
@@ -78,6 +118,7 @@ export function createMcpApp(deps: McpServerDeps): McpApp {
     mcp,
     toolNames: registered.names,
     channelCheck,
+    listenState,
     beginShutdown: () => shutdownController.abort(),
   };
 }
@@ -118,6 +159,7 @@ export function startOnStdio(deps: McpServerDeps, io: StdioEnvironment): McpServ
       timers.clearTimeout(forceTimer);
       // 예산을 넘겼어도 수신함의 타이머는 지운다. 여러 번 불러도 된다.
       inbox.close();
+      app.listenState?.remove();
       const duration = now() - startedAt;
       log.event(forced ? 'warn' : 'info', 'mcp-server', 'shutdown', { cause, duration_ms: duration, forced });
       resolveClosed({ cause, forced, duration_ms: duration });

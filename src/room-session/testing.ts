@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import type { LogFields, LogLevel, LogModule, LogPort } from '../diagnostics/log-port.js';
-import type { DeliveryMode, InboxEvent, InboxEvents, ModeChanged } from '../inbox/contract.js';
+import type { DeliveredEvent, DeliveryMode, InboxEvent, InboxEvents, ModeChanged } from '../inbox/contract.js';
 import type {
   AttemptFailed,
   CreateMesh,
@@ -255,8 +255,17 @@ export class FakeInbox implements SessionInbox {
 
   /** 아직 내주지 않은 사건을 에이전트에게 내준 것으로 친다. */
   take(): InboxEvent[] {
-    const fresh = this.queue.slice(this.handedOut);
+    const start = this.handedOut;
+    const fresh = this.queue.slice(start);
     this.handedOut = this.queue.length;
+    // 실제 수신함처럼 처음 내준 사건을 알린다(읽음 확인이 이것을 듣는다).
+    if (fresh.length > 0) {
+      const at = new Date(0).toISOString();
+      this.emitter.emit(
+        'handed',
+        fresh.map((event, index) => ({ ...event, cursor: String(start + index + 1), received_at: at }) as DeliveredEvent),
+      );
+    }
     return fresh;
   }
 
@@ -1240,6 +1249,10 @@ export class ScriptedPeer {
     return this;
   }
 
+  /**
+   * 새 구현처럼 observer: false 를 싣는다. 관전자를 연기하려면 { observer: true }, 관전자를 모르는 구버전은
+   * { observer: undefined }(JSON 에서 빠진다)를 준다.
+   */
   hello(overrides: Record<string, unknown> = {}): this {
     return this.send({
       v: LIMITS.P2P_VERSION,
@@ -1248,6 +1261,7 @@ export class ScriptedPeer {
       sid: this.sid,
       wall: this.mesh.net.clock.now(),
       client: { name: 'agent-chat', version: '0.1.0' },
+      observer: false,
       ...overrides,
     });
   }

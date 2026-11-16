@@ -10,3 +10,4 @@ export { EXIT_FAILED, EXIT_NO_HOST, EXIT_OK, runRemove, runSetup } from './setup
 export type { SetupDeps } from './setup.js';
 export { runDoctor } from './doctor.js';
 export type { DoctorDeps, DoctorLimits, DoctorResult } from './doctor.js';
+export { parseCheckArgs, runStopHookCheck } from './stop-hook.js';

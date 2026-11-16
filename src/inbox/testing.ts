@@ -111,6 +111,7 @@ export function testStoppedEvent(by = 'codex-7f3k'): TestEvent {
       limits: { max_duration_min: 60, max_scenarios: 20 },
       reason: 'user',
       by,
+      detail: 'the user asked to stop',
     },
   };
 }

@@ -19,8 +19,16 @@ export interface EventSinkDeps {
   readonly now: Now;
   readonly timers: Timers;
   readonly log: LogPort;
-  /** 기한이 찼다. stop{time_limit} 을 쓰고 보내는 일은 로컬 쓰기 경로가 한다. */
-  readonly onDeadline: () => void;
+  /**
+   * 기한이 찼다. stop{time_limit} 을 쓰고 보내는 일은 로컬 쓰기 경로가 한다.
+   * null 이면 기한 타이머를 걸지 않는다(관전 모드. 관전자는 기록을 쓰지 않는다. 기한 중단은 기한을 본 참가자가 쓴다).
+   */
+  readonly onDeadline: (() => void) | null;
+  /**
+   * 사건을 받는 쪽. observer(관전 모드)면 다른 참가자의 presence.status 가 바뀔 때마다 peer / status 를 더 낸다.
+   * participant 는 잦은 상태 변화를 알리지 않고 ready 만 알린다.
+   */
+  readonly audience: 'participant' | 'observer';
 }
 
 export interface ReceivedChat {
@@ -30,9 +38,18 @@ export interface ReceivedChat {
   readonly text: string;
   /** 작성자의 벽시계. 표시용이다. */
   readonly wall: number;
+  /** 보낸 쪽이 읽음 확인을 요청했다(chat.rr). 사건의 data.read_receipt 가 된다. */
+  readonly readReceipt?: boolean;
+  /** 관전자(사람이 관전 콘솔에서 쓴 글)가 보냈다. 사건의 data.observer 가 된다. */
+  readonly fromObserver?: boolean;
 }
 
 export interface EventSink {
+  /**
+   * 그 참가자의 presence.listening 이 거짓이 된 때(그 presence 기록의 벽시계). 듣고 있거나 모르면 null.
+   * 입장 때 이미 듣지 않던 참가자는 그 presence 를 마지막으로 쓴 때다(근삿값).
+   */
+  notListeningSince(peer: string): number | null;
   /** 기록 파일을 열었다. 열지 못했으면 null 을 준다(기록 없이 동작하고 record_failed 로 알린다). */
   attachTranscript(transcript: Transcript | null): void;
   transcriptPath(): string | null;
@@ -71,6 +88,10 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
   let stateEvents = false;
   let closed = false;
   let deadline: TimerHandle | null = null;
+  /** 듣지 않는 참가자와 그 시각. */
+  const stoppedSince = new Map<string, number>();
+  /** stopped_listening 을 알린 참가자. 다시 들을 때 listening 을 알린다(입장 직후의 첫 수신 시작은 알리지 않는다). */
+  const announcedStop = new Set<string>();
 
   const push = (event: InboxEvent): void => {
     if (closed) return;
@@ -114,7 +135,8 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
   /** 기한 타이머를 남은 시간(제한 − 경과)으로 건다. 경과 시간은 shared-state 가 잰 값만 쓴다. */
   const armDeadline = (): void => {
     cancelDeadline();
-    if (closed) return;
+    const onDeadline = deps.onDeadline;
+    if (closed || onDeadline === null) return;
     const now = deps.now();
     const test = deps.replica.view(now).test;
     if (test === null || test.stopped !== null) return;
@@ -122,7 +144,7 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
     if (elapsed === null) return;
     const remaining = test.max_duration_min * 60_000 - elapsed;
     if (remaining <= 0) {
-      deps.onDeadline();
+      onDeadline();
       return;
     }
     deadline = deps.timers.setTimeout(() => {
@@ -135,6 +157,37 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
 
   const peerEvent = (peer: string, change: PeerChange, text: string, data: PeerEvent['data']): void => {
     push({ kind: 'peer', change, id: null, from: peer, to: 'room', ts: toIso(deps.now(), 0), text, data });
+  };
+
+  /** listening 의 변화를 적고, 입장 뒤면 사건으로 알린다. 상태 사건을 켜기 전(입장 중)에도 시각은 적는다. */
+  const listeningChanged = (peer: string, previous: PresenceBody | null, current: PresenceBody): void => {
+    if (peer === deps.self) return;
+    if (current.status === 'left') {
+      stoppedSince.delete(peer);
+      announcedStop.delete(peer);
+      return;
+    }
+    const wasHere = previous !== null && previous.status !== 'left';
+    if (current.listening) {
+      stoppedSince.delete(peer);
+      if (announcedStop.delete(peer) && stateEvents && wasHere) {
+        peerEvent(peer, 'listening', `${peer} is listening to the room again.`, presenceData(current));
+      }
+      return;
+    }
+    if (stoppedSince.has(peer)) return;
+    const now = deps.now();
+    const wall = deps.replica.view(now).presences.find((presence) => presence.peer === peer)?.wall ?? now;
+    stoppedSince.set(peer, wall);
+    if (stateEvents && wasHere && previous.listening) {
+      announcedStop.add(peer);
+      peerEvent(
+        peer,
+        'stopped_listening',
+        `${peer} stopped listening: its agent is not reading room events now. Your messages are still stored there, but a reply may wait until its user has it wait again. Tell your user instead of waiting silently.`,
+        { ...presenceData(current), since: toIso(wall, now) },
+      );
+    }
   };
 
   const presenceChanged = (peer: string, previous: PresenceBody | null, current: PresenceBody): void => {
@@ -153,6 +206,10 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
     }
     if (previous.role !== current.role) {
       peerEvent(peer, 'role', `${peer} changed role.`, presenceData(current));
+    }
+    // 관전 모드는 사람이 방의 흐름을 보는 것이라 상태가 바뀔 때마다 알린다. 에이전트에게는 내지 않는다.
+    if (deps.audience === 'observer' && previous.status !== current.status) {
+      peerEvent(peer, 'status', `${peer} is now ${current.status}.`, presenceData(current));
     }
     // 잦은 상태 변화는 알리지 않는다. ready 가 된 것만 알린다.
     if (previous.status !== 'ready' && current.status === 'ready') {
@@ -181,6 +238,8 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
         limits: { max_duration_min: test.max_duration_min, max_scenarios: test.max_scenarios },
         reason: change.stop.reason,
         by: change.stop.by,
+        // 중단 사유 글(stop_test 의 reason). 기한 중단은 빈 글이다. 관전 출력이 중단 사유를 보인다.
+        detail: change.stop.detail,
       },
     });
   };
@@ -212,6 +271,7 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
             limits: { max_duration_min: change.test.max_duration_min, max_scenarios: change.test.max_scenarios },
             reason: null,
             by: change.test.by,
+            detail: null,
           },
         });
         return;
@@ -291,6 +351,7 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
   };
 
   return {
+    notListeningSince: (peer) => stoppedSince.get(peer) ?? null,
     attachTranscript(opened) {
       transcript = opened;
       if (opened === null) markRecordFailed();
@@ -315,6 +376,7 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
             });
           }
         }
+        if (change.type === 'presence_changed') listeningChanged(change.peer, change.previous, change.current);
         // 입장 중에 스냅샷으로 받은 것은 이미 있던 상태다. 입장 결과가 그것을 싣는다.
         if (stateEvents) toInbox(change, origin);
       }
@@ -334,7 +396,10 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
         to: chat.to,
         ts: toIso(chat.wall, deps.now()),
         text: chat.text,
-        data: {},
+        data: {
+          ...(chat.readReceipt === true ? { read_receipt: true as const } : {}),
+          ...(chat.fromObserver === true ? { observer: true as const } : {}),
+        },
       });
     },
     record: append,
@@ -349,6 +414,11 @@ export function createEventSink(deps: EventSinkDeps): EventSink {
         unreachable: `Could not open a direct connection to ${peer}. Your messages do not reach that participant.`,
         role: `${peer} changed role.`,
         ready: `${peer} is ready.`,
+        stopped_listening: `${peer} stopped listening to the room.`,
+        listening: `${peer} is listening to the room again.`,
+        status: `${peer} changed status.`,
+        observer_joined: `${peer} started observing the room (read-only). Room-wide messages and the shared state reach it.`,
+        observer_left: `${peer} stopped observing the room.`,
       };
       peerEvent(peer, change, text[change], reason === null ? {} : { reason });
     },

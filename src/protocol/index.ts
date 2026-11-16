@@ -207,5 +207,10 @@ export {
   channelCheckSchema,
   parseChannelCheck,
   serializeChannelCheck,
+  LISTEN_STATE_DIR_NAME,
+  LISTEN_STATE_VERSION,
+  listenStateSchema,
+  parseListenState,
+  serializeListenState,
 } from './local-files.js';
-export type { ChannelCheck } from './local-files.js';
+export type { ChannelCheck, ListenState } from './local-files.js';

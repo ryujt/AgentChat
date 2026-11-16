@@ -1,5 +1,5 @@
-// 호스트 CLI(claude, codex)를 실행하는 유일한 파일 (architecture.md 3.13, mcp-interface.md 10절).
-// 실행하는 하위 명령은 `--version`, `mcp get`·`add`·`remove`·`list`, `auth status` 뿐이다.
+// 호스트 CLI(claude, codex, gemini)를 실행하는 유일한 파일 (architecture.md 3.13, mcp-interface.md 10절).
+// 실행하는 하위 명령은 `--version`, `mcp get`·`add`·`remove`·`list`, `auth status` 뿐이다(Gemini CLI 에는 `mcp get` 이 없다).
 // 그 밖의 인자 묶음은 실행 전에 거절한다. 호스트를 새 에이전트로 띄우는 길을 여기서 막는다.
 
 import { execFile } from 'node:child_process';
@@ -73,6 +73,20 @@ function isAddCommand(args: readonly string[], head: readonly string[], envFlag:
   return launch.length === 2 && command !== undefined && script !== undefined && isAbsolute(command) && isAbsolute(script) && isMcpEntry(script);
 }
 
+/** Gemini CLI: `mcp add --scope user (-e KEY=VALUE)* agent-chat <절대 경로 node> <…/dist/entry/mcp.js>`. `--` 로 가르면 Gemini CLI 가 거절한다. */
+function isGeminiAddCommand(args: readonly string[]): boolean {
+  const head = ['mcp', 'add', '--scope', 'user'];
+  if (!sameArgs(args.slice(0, head.length), head)) return false;
+  let index = head.length;
+  while (args[index] === '-e') {
+    if (!ENV_ASSIGNMENT.test(args[index + 1] ?? '')) return false;
+    index += 2;
+  }
+  const rest = args.slice(index);
+  const [name, command, script] = rest;
+  return rest.length === 3 && name === SERVER_NAME && command !== undefined && script !== undefined && isAbsolute(command) && isAbsolute(script) && isMcpEntry(script);
+}
+
 /**
  * 인자 묶음이 허용 목록에 있는지 본다. 있으면 null, 없으면 거절 사유다.
  * 등록 이름은 `agent-chat` 하나뿐이고, 등록하는 명령은 "node 절대 경로 + 이 패키지의 MCP 진입점" 꼴만 받는다.
@@ -87,17 +101,21 @@ export function checkHostCliArgs(host: HostKind, args: readonly string[]): strin
           ['mcp', 'remove', '--scope', 'user', SERVER_NAME],
           ['auth', 'status'],
         ]
-      : [
-          ['--version'],
-          ['mcp', 'get', SERVER_NAME, '--json'],
-          ['mcp', 'list', '--json'],
-          ['mcp', 'remove', SERVER_NAME],
-        ];
+      : host === 'codex'
+        ? [
+            ['--version'],
+            ['mcp', 'get', SERVER_NAME, '--json'],
+            ['mcp', 'list', '--json'],
+            ['mcp', 'remove', SERVER_NAME],
+          ]
+        : [['--version'], ['mcp', 'list'], ['mcp', 'remove', '--scope', 'user', SERVER_NAME]];
   if (fixed.some((allowed) => sameArgs(args, allowed))) return null;
   const added =
     host === 'claude'
       ? isAddCommand(args, ['mcp', 'add', '--scope', 'user', SERVER_NAME], '-e')
-      : isAddCommand(args, ['mcp', 'add', SERVER_NAME], '--env');
+      : host === 'codex'
+        ? isAddCommand(args, ['mcp', 'add', SERVER_NAME], '--env')
+        : isGeminiAddCommand(args);
   return added ? null : 'not an allowed host CLI subcommand';
 }
 

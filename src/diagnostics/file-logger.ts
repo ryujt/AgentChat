@@ -61,6 +61,7 @@ export function createFileLoggerWith(options: FileLoggerOptions, env: FileLogger
   }
 
   const { dir, service, level: threshold, now, timers } = options;
+  const stderrCopy = options.stderrCopy ?? true;
   const { io, stderr } = env;
   const maxBufferLines = env.limits?.maxBufferLines ?? MAX_BUFFER_LINES;
   const maxHourFileBytes = env.limits?.maxHourFileBytes ?? MAX_HOUR_FILE_BYTES;
@@ -139,7 +140,7 @@ export function createFileLoggerWith(options: FileLoggerOptions, env: FileLogger
     dropped = 0;
     hourBytes += bytes;
     buffer.push({ file: logFileName(key, proc), text });
-    if (passesLevel(level, 'warn')) {
+    if (stderrCopy && passesLevel(level, 'warn')) {
       try {
         stderr.write(text);
       } catch {

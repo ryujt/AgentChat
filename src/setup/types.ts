@@ -3,12 +3,12 @@
 import type { LogPort } from '../diagnostics/log-port.js';
 
 /** 설치가 다루는 에이전트 호스트. */
-export type HostKind = 'claude' | 'codex';
+export type HostKind = 'claude' | 'codex' | 'gemini';
 
-export const HOSTS: readonly HostKind[] = ['claude', 'codex'];
+export const HOSTS: readonly HostKind[] = ['claude', 'codex', 'gemini'];
 
 /** 사람에게 보이는 호스트 이름. */
-export const HOST_LABEL: Readonly<Record<HostKind, string>> = { claude: 'Claude Code', codex: 'Codex' };
+export const HOST_LABEL: Readonly<Record<HostKind, string>> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI' };
 
 /** MCP 등록 이름. 채널 플래그의 `server:<이름>` 과 같아야 한다(mcp-interface.md 1절). */
 export const SERVER_NAME = 'agent-chat';

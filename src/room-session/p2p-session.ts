@@ -3,6 +3,7 @@
 // 지문 비교와 재동기화, 진전 판정과 간격 조정, 중단을 병합했을 때의 즉시 교환을 맡는다.
 // 병합과 경과 시간의 계산은 shared-state 가 한다. 여기서는 받은 값을 그대로 넘긴다.
 // chat 과 ack 는 내용을 보지 않고 부르는 쪽에 넘긴다. 누구에게 접촉할지는 모른다.
+// 관전자 링크(hello.observer: true)의 chat 과 변경은 받지 않는다. 스냅샷은 그 관전자가 쓴 기록만 빼고 받는다(protocol.md 4.6).
 
 import type { LogPort } from '../diagnostics/log-port.js';
 import type { Mesh } from '../mesh/contract.js';
@@ -44,14 +45,19 @@ type ExchangeCause = 'link_open' | 'ping_mismatch' | 'reply' | 'stop';
 export interface P2PHooks {
   /** 상대의 sync_end 를 처음 받았다. 그 링크는 동기화됐다. */
   synced(peer: string): void;
+  /** 상대의 hello 를 받아들였다. observer 는 그 hello 의 관전자 표시다(필드가 없으면 null = 관전자를 모르는 구버전). */
+  greeted(peer: string, sid: string, observer: boolean | null): void;
   failed(peer: string, reason: SessionFailureReason, theirVersion: number | null): void;
   bye(peer: string, sid: string, reason: Exclude<ByeReason, 'version'>): void;
-  chat(peer: string, frame: ChatFrame): void;
-  ack(peer: string, id: string): void;
+  /** observer 가 참이면 관전자 링크에서 온 글이다(사람이 관전 콘솔에서 쓴 글). */
+  chat(peer: string, frame: ChatFrame, observer: boolean): void;
+  /** read 가 참이면 읽음 확인이다(ack{read: true}). */
+  ack(peer: string, id: string, read: boolean): void;
 }
 
 export interface P2PSessionDeps {
-  readonly self: { readonly peer: string; readonly sid: string };
+  /** observer 는 내 hello 에 싣는 관전자 표시다(관전 모드면 참). */
+  readonly self: { readonly peer: string; readonly sid: string; readonly observer: boolean };
   readonly app: AppInfo;
   readonly mesh: Pick<Mesh, 'send' | 'closeLink' | 'markAlive'>;
   readonly replica: Replica;
@@ -72,6 +78,8 @@ export interface LinkView {
   readonly diverged: boolean;
   /** hello.wall 로 본 시계 차이가 CLOCK_SKEW_WARN_MS 를 넘는다. */
   readonly clockSkew: boolean;
+  /** 상대 hello 의 관전자 표시. hello 전이거나 필드가 없으면(구버전) null. */
+  readonly observer: boolean | null;
 }
 
 export interface LocalWrite {
@@ -89,7 +97,8 @@ export interface P2PSession {
   ping(peer: string, sc: number, sf: string): void;
   /** 복제본에 로컬 명령을 넣고, 만든 기록을 열린 링크 전부에 변경으로 보낸다. */
   applyLocal(command: StateCommand): LocalWrite;
-  ack(peer: string, id: string): void;
+  /** read 가 참이면 읽음 확인(ack{read: true})을 보낸다. */
+  ack(peer: string, id: string, read?: boolean): void;
   /** 채팅 쪽이 버린 프레임을 잘못된 프레임으로 센다. */
   countBadFrame(peer: string, code: string): void;
   byeAll(reason: 'leave' | 'shutdown'): void;
@@ -118,6 +127,7 @@ interface LinkState {
   gapMs: number;
   diverged: boolean;
   clockSkew: boolean;
+  observer: boolean | null;
   badFrames: number[];
 }
 
@@ -130,6 +140,7 @@ function viewOf(link: LinkState): LinkView {
     synced: link.synced,
     diverged: link.diverged,
     clockSkew: link.clockSkew,
+    observer: link.observer,
   };
 }
 
@@ -236,17 +247,30 @@ export function createP2PSession(deps: P2PSessionDeps): P2PSession {
         });
       }
     }
+    link.observer = frame.observer ?? null;
+    hooks.greeted(link.peer, link.sid, link.observer);
   };
 
   const onState = (link: LinkState, frame: StateFrame, invalidRecords: number): void => {
     const now = deps.now();
     mesh.markAlive(link.peer);
     const snapshot = frame.snap === true;
-    const merged = replica.mergeRemote(frame.records, { from: link.peer, snapshot }, now);
+    let records = frame.records;
+    let skipped = 0;
+    if (link.observer === true) {
+      // 관전자는 공유 상태에 기록을 쓰지 않는다. 변경은 통째로 버리고, 스냅샷에서는 그 관전자가 쓴 기록만 뺀다.
+      if (!snapshot) {
+        countBad(link, 'observer_write');
+        return;
+      }
+      records = frame.records.filter((record) => record.author !== link.peer);
+      skipped = frame.records.length - records.length;
+    }
+    const merged = replica.mergeRemote(records, { from: link.peer, snapshot }, now);
     log.event('info', 'room-session', 'state.merge', {
       peer: link.peer,
       applied: merged.applied.length,
-      ignored: merged.ignored + invalidRecords,
+      ignored: merged.ignored + invalidRecords + skipped,
       anomalies: merged.anomalies,
       snapshot,
     });
@@ -360,6 +384,7 @@ export function createP2PSession(deps: P2PSessionDeps): P2PSession {
         gapMs: LIMITS.RESYNC_MIN_GAP_MS,
         diverged: false,
         clockSkew: false,
+        observer: null,
         badFrames: [],
       };
       links.set(link.peer, link);
@@ -370,6 +395,8 @@ export function createP2PSession(deps: P2PSessionDeps): P2PSession {
         sid: deps.self.sid,
         wall: Math.max(0, Math.trunc(now)),
         client: { name: deps.app.name, version: deps.app.version },
+        // 새 구현은 늘 싣는다. 없으면 상대는 관전자를 모르는 구버전으로 본다(protocol.md 4.6).
+        observer: deps.self.observer,
       });
       // 받은 프레임을 처리하기 전에 보낸다. 그래서 첫 동기화는 양쪽이 동시에 시작한 교환이 된다.
       startExchange(link, 'link_open');
@@ -436,10 +463,11 @@ export function createP2PSession(deps: P2PSessionDeps): P2PSession {
           onSyncEnd(link, frame);
           return;
         case 'chat':
-          hooks.chat(peer, frame);
+          // 관전자도 사람이 콘솔에서 쓴 글(지시)을 보낼 수 있다(2026-11-16). 받는 쪽이 관전자의 글로 표시한다.
+          hooks.chat(peer, frame, link.observer === true);
           return;
         case 'ack':
-          hooks.ack(peer, frame.id);
+          hooks.ack(peer, frame.id, frame.read === true);
           return;
       }
     },
@@ -480,8 +508,8 @@ export function createP2PSession(deps: P2PSessionDeps): P2PSession {
       return { result, sentTo };
     },
 
-    ack(peer, id) {
-      if (links.has(peer)) sendFrame(peer, { v: LIMITS.P2P_VERSION, t: 'ack', id });
+    ack(peer, id, read = false) {
+      if (links.has(peer)) sendFrame(peer, read ? { v: LIMITS.P2P_VERSION, t: 'ack', id, read: true } : { v: LIMITS.P2P_VERSION, t: 'ack', id });
     },
 
     countBadFrame(peer, code) {

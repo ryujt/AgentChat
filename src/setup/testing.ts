@@ -2,7 +2,8 @@
 // 가짜 호스트 CLI 는 host-cli.ts 와 같은 허용 목록을 거친 인자만 받고, 실제 CLI 가 내는 출력 형식을 흉내 낸다.
 // 가짜 MCP 서버는 프로세스를 띄우지 않고 메모리 전송으로 붙는다.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -137,7 +138,8 @@ function appendCodexServer(path: string, server: StoredServer): void {
 export function createFakeHost(host: HostKind, options: FakeHostOptions = {}): FakeHost {
   const calls: string[][] = [];
   const scopes = new Map<'user' | 'local' | 'project', StoredServer>();
-  const version = options.version === undefined ? (host === 'claude' ? '2.1.325 (Claude Code)' : 'codex-cli 0.169.0') : options.version;
+  const version =
+    options.version === undefined ? (host === 'claude' ? '2.1.325 (Claude Code)' : host === 'codex' ? 'codex-cli 0.169.0' : '0.66.0') : options.version;
   const absent = (): HostCliResult =>
     host === 'claude'
       ? done(1, '', `No MCP server named "${SERVER_NAME}". Configured servers: other\n`)
@@ -230,6 +232,42 @@ export function createFakeHost(host: HostKind, options: FakeHostOptions = {}): F
     return done(0, '[]\n');
   };
 
+  /** Gemini CLI: 사용자 설정 파일(options.configPath)의 mcpServers 를 고친다. 같은 이름을 다시 넣으면 항목을 통째로 바꾼다(실제 0.66.0 과 같다). */
+  const gemini = (args: readonly string[]): HostCliResult => {
+    const path = options.configPath ?? '';
+    const read = (): Record<string, unknown> => (existsSync(path) ? (JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>) : {});
+    const write = (settings: Record<string, unknown>): void => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify(settings, null, 2));
+    };
+    const [, second] = args;
+    if (second === 'add') {
+      if (options.failAdd === true) return done(1, '', 'add failed\n');
+      const env: Record<string, string> = {};
+      let index = 4;
+      while (args[index] === '-e') {
+        const pair = args[index + 1] ?? '';
+        env[pair.slice(0, pair.indexOf('='))] = pair.slice(pair.indexOf('=') + 1);
+        index += 2;
+      }
+      const [, command, ...rest] = args.slice(index);
+      const settings = read();
+      const servers = { ...((settings['mcpServers'] as Record<string, unknown> | undefined) ?? {}) };
+      servers[SERVER_NAME] = { command, args: rest, env };
+      write({ ...settings, mcpServers: servers });
+      return done(0, `MCP server "${SERVER_NAME}" added to user settings. (stdio)\n`);
+    }
+    if (second === 'remove') {
+      const settings = read();
+      const servers = { ...((settings['mcpServers'] as Record<string, unknown> | undefined) ?? {}) };
+      if (!(SERVER_NAME in servers)) return done(0, `Server "${SERVER_NAME}" not found in user settings.\n`);
+      delete servers[SERVER_NAME];
+      write({ ...settings, mcpServers: servers });
+      return done(0, `Server "${SERVER_NAME}" removed from user settings.\n`);
+    }
+    return done(0, 'No MCP servers configured.\n');
+  };
+
   return {
     host,
     bin: host,
@@ -241,7 +279,7 @@ export function createFakeHost(host: HostKind, options: FakeHostOptions = {}): F
       if (version === null) return Promise.resolve({ outcome: 'not-found', code: null, stdout: '', stderr: '', detail: 'executable not found' });
       calls.push([...args]);
       if (args[0] === '--version') return Promise.resolve(done(0, `${version}\n`));
-      return Promise.resolve(host === 'claude' ? claude(args) : codex(args));
+      return Promise.resolve(host === 'claude' ? claude(args) : host === 'codex' ? codex(args) : gemini(args));
     },
   };
 }

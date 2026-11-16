@@ -65,7 +65,7 @@ function eventCursors(reply) {
 }
 
 describe('V-L7(가) capability 와 instructions', () => {
-  it('초기화 응답: tools 와 채널 capability, instructions, tool 14개. permission relay 는 없다', async () => {
+  it('초기화 응답: tools 와 채널 capability, instructions, tool 15개. permission relay 는 없다', async () => {
     const server = await sdk();
     const capabilities = server.client.getServerCapabilities();
     assert.deepEqual(capabilities.experimental, { 'claude/channel': {} });
@@ -75,7 +75,7 @@ describe('V-L7(가) capability 와 instructions', () => {
     assert.equal(server.client.getServerVersion().name, 'agent-chat');
     const { tools } = await server.client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [...TOOL_NAMES].sort());
-    assert.equal(tools.length, 14);
+    assert.equal(tools.length, 15);
     await server.close();
     assert.deepEqual(server.errors, []);
   });
@@ -84,7 +84,7 @@ describe('V-L7(가) capability 와 instructions', () => {
     const server = await sdk({ env: { AGENT_CHAT_CHANNEL: 'off' } });
     assert.equal(server.client.getServerCapabilities().experimental, undefined);
     const { tools } = await server.client.listTools();
-    assert.equal(tools.length, 13);
+    assert.equal(tools.length, 14);
     assert.equal(tools.some((tool) => tool.name === 'confirm_channel'), false);
     const created = await server.call('create_room');
     assert.equal(created.json.delivery_mode, 'poll');
@@ -454,7 +454,7 @@ describe('V-L7(가) 잘못된 환경 변수로도 프로세스가 뜬다', () =>
 
   it('TURN 이 든 ICE 설정: 프로세스는 뜨고, 기본값으로 바꾸지 않고, 입장을 ICE_CONFIG_REJECTED 로 거절한다', async () => {
     const server = await sdk({ env: { AGENT_CHAT_ICE_SERVERS: 'stun:stun.example.com,turn:user:zq-secret@relay.example.com:3478' } });
-    assert.equal((await server.client.listTools()).tools.length, 14);
+    assert.equal((await server.client.listTools()).tools.length, 15);
     for (const [tool, args] of [
       ['create_room', {}],
       ['join_room', { room_id: 'abcdefgh12345678' }],

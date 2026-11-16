@@ -17,6 +17,7 @@ import type {
   SignalErrorCode,
   StopReason,
   Timers,
+  VerificationResult,
 } from '../protocol/index.js';
 import type { OpenTranscript, ReportSummary, WriteReport } from '../records/contract.js';
 import type {
@@ -127,6 +128,12 @@ export interface JoinRoomArgs {
   readonly signal?: AbortSignal;
 }
 
+/**
+ * 관전 입장(protocol.md 4.6, architecture.md 3.10 의 관전 모드). join 과 같은 인자다.
+ * 시그널링 join(mode=join) 으로 들어가 join 과 같은 입장 판정을 한다. 방을 만들지 않는다.
+ */
+export type ObserveRoomArgs = JoinRoomArgs;
+
 export interface SendChatArgs {
   /** UTF-8 16384바이트 이하. resend_of 를 주면 무시하고 원문을 쓴다. */
   readonly text: string;
@@ -148,6 +155,11 @@ export type SessionCommand =
       readonly role?: string | null;
       readonly tools?: readonly string[];
       readonly note?: string | null;
+      /**
+       * false 만 받는다. 에이전트가 지금부터 듣지 않는다고 알린다. 부르는 쪽(mcp-server)이 먼저 inbox.pauseListening() 을 부르고,
+       * room-session 은 그때의 inbox.listening() 을 presence 에 바로 쓴다(유예를 기다리지 않는다). 다음 wait 이 풀어 준다.
+       */
+      readonly listening?: false;
     }
   /** reason 은 사용자가 말한 중단 사유 글이다. stop 기록의 detail 이 된다. */
   | { readonly type: 'stop_test'; readonly reason: string }
@@ -262,6 +274,18 @@ export type SessionWarning =
   | { readonly code: 'clock_skew'; readonly peer: string }
   | { readonly code: 'record_failed' };
 
+/**
+ * 관전자 한 명(protocol.md 4.6). 이 세션에서 hello.observer: true 를 받은 이름 가운데, 지금 링크가 있거나 서버 목록에 있는 것.
+ * bye{leave|shutdown} 로 닫히면 빠진다. 같은 이름이 hello.observer: false 로 다시 들어오면 참가자로 옮긴다.
+ */
+export interface ObserverView {
+  readonly name: string;
+  /** ParticipantView.link 와 같은 뜻. */
+  readonly link: LinkStatus;
+  /** 그 관전자(그 sid)의 hello 를 처음 받은 때(UTC ISO 8601). */
+  readonly since: string;
+}
+
 /** get_status 의 결과에서 delivery_mode 와 mcp-server 가 더하는 경고(수신함 누락, 무시한 설정)를 뺀 것. */
 export interface SessionStatus {
   readonly room: {
@@ -277,8 +301,13 @@ export interface SessionStatus {
       readonly srflx_seen: boolean;
     };
   };
-  /** 자신을 뺀다. presence 가 있는 이름, 링크가 있거나 시도 중인 피어, 서버가 가장 최근에 준 목록의 합집합이다. */
+  /**
+   * 자신을 뺀다. presence 가 있는 이름, 링크가 있거나 시도 중인 피어, 서버가 가장 최근에 준 목록의 합집합이다.
+   * 알려진 관전자는 뺀다(observers 에 싣는다).
+   */
   readonly participants: readonly ParticipantView[];
+  /** 읽기 전용으로 지켜보는 관전자. 준비 판정·waiting_for_you·도달 범위·unreachable 경고에 들지 않는다. */
+  readonly observers: readonly ObserverView[];
   readonly test: TestStatus | null;
   readonly claims: ClaimCounts;
   readonly warnings: readonly SessionWarning[];
@@ -309,6 +338,8 @@ export interface RoomEntered {
    * shown_as 는 자기 status 로만 정한다(ready → ready, working → working, 그 밖 → not_ready).
    */
   readonly participants: readonly ParticipantView[];
+  /** 입장한 때 이미 방을 지켜보던 관전자(hello.observer: true 를 받은 피어). create 는 빈 목록이다. */
+  readonly observers: readonly ObserverView[];
   /** 현재 테스트. 재입장자는 여기서 목표와 남은 제한을 받는다. create 는 null. */
   readonly test: TestStatus | null;
   /**
@@ -344,6 +375,107 @@ export interface ChatSent {
   readonly delivered: readonly string[];
   /** ack_timeout 은 결과 불명이다. 실패 확정이 아니다. */
   readonly undelivered: readonly { readonly name: string; readonly reason: 'not_connected' | 'ack_timeout' }[];
+  /**
+   * 수신자 가운데 지금 에이전트가 듣고 있지 않은 참가자(presence.listening 이 거짓)와 그렇게 된 시각(UTC ISO 8601).
+   * delivered 여도 그 에이전트는 아직 읽지 않는다. 한 명도 없으면 싣지 않는다.
+   */
+  readonly not_listening?: readonly NotListening[];
+}
+
+export interface NotListening {
+  readonly name: string;
+  /** presence.listening 이 거짓이 된 때(그 참가자가 presence 를 쓴 벽시계). 입장 때 이미 그랬으면 근삿값이다. */
+  readonly since: string;
+}
+
+/**
+ * 점검 결과 한 명(ping_room). 시간은 점검 글을 보낸 때부터 잰 이 PC 의 ms 다.
+ * - read: 그 에이전트가 점검 글을 꺼내 갔다(read_ms).
+ * - not_listening: 전달은 됐지만 그 에이전트가 듣고 있지 않다(presence.listening 이 거짓). 기한 안에 읽지 않았다.
+ * - not_read: 전달은 됐고 듣는 중으로 보이지만 기한 안에 읽지 않았다(다른 일을 하는 중이거나 구버전이다).
+ * - no_ack: 보냈지만 받았다는 확인이 오지 않았다(결과 불명).
+ * - not_connected: 나와 링크가 없어 보내지 못했다.
+ */
+export interface PingPeer {
+  readonly name: string;
+  readonly outcome: 'read' | 'not_listening' | 'not_read' | 'no_ack' | 'not_connected';
+  readonly delivered_ms: number | null;
+  readonly read_ms: number | null;
+  /** 그 참가자의 presence.listening. presence 를 못 받았으면 null. */
+  readonly listening: boolean | null;
+}
+
+export interface PingSent {
+  readonly message_id: string;
+  readonly participants: readonly PingPeer[];
+  /** outcome 이 not_listening 인 참가자. */
+  readonly not_listening: readonly NotListening[];
+}
+
+export interface PingArgs {
+  /** 듣는 중인 참가자의 읽음 확인을 기다리는 최대 시간. */
+  readonly timeoutMs: number;
+}
+
+/** 관전 요약의 시나리오 한 줄. 한도 초과를 포함해 전부 싣는다. 값은 shared-state 의 view 를 이름만 바꿔 옮긴다. */
+export interface ObservedScenario {
+  readonly scenario_id: string;
+  readonly index: number;
+  readonly title: string;
+  readonly by: string;
+  readonly plan: string | null;
+  readonly actor: string | null;
+  readonly verifier: string | null;
+  readonly over_limit: boolean;
+  /** 작성자의 벽시계(UTC ISO 8601). 표시용이다. */
+  readonly wall: string;
+}
+
+export interface ObservedVerification {
+  readonly by: string;
+  readonly result: VerificationResult;
+  readonly evidence: string;
+  /** 판정에 넣는가. 주장 작성자가 쓴 검증은 거짓이다. */
+  readonly counted: boolean;
+  readonly wall: string;
+}
+
+/** 관전 요약의 주장 한 줄. 전부 싣는다. */
+export interface ObservedClaim {
+  readonly claim_id: string;
+  readonly scenario_id: string;
+  readonly by: string;
+  readonly outcome: ClaimOutcome;
+  readonly action: string;
+  readonly expected: string | null;
+  readonly observed: string;
+  readonly steps: string;
+  readonly status: ClaimStatus;
+  /** 중단 뒤 기록. */
+  readonly late: boolean;
+  readonly wall: string;
+  readonly verifications: readonly ObservedVerification[];
+}
+
+/**
+ * 관전 요약(observe 의 결과, observed()). 지금 복제본과 링크로 만든다.
+ * **room_id 는 싣지 않는다.** 출력 쪽(콘솔)이 방 ID(접근 수단)를 실수로 찍지 못하게 타입에서 뺀다.
+ */
+export interface RoomObserved {
+  /** 정규화한 서버 키. */
+  readonly server: string;
+  /** 이 세션의 이름. */
+  readonly name: string;
+  readonly signaling: SignalingState;
+  /** 자신과 알려진 관전자를 뺀 참가자. SessionStatus.participants 와 같은 규칙이다. */
+  readonly participants: readonly ParticipantView[];
+  /** 자신을 뺀 관전자. */
+  readonly observers: readonly ObserverView[];
+  /** 관전자를 모르는 구버전 참가자(그 링크의 hello 에 observer 가 없었다). 그쪽에는 관전 사실이 표시되지 않는다. */
+  readonly unaware: readonly string[];
+  readonly test: TestStatus | null;
+  readonly scenarios: readonly ObservedScenario[];
+  readonly claims: readonly ObservedClaim[];
 }
 
 export interface ReportWritten {
@@ -384,18 +516,18 @@ export interface CommandOutputs {
  *
  * | 코드 | 나오는 곳 | 뜻 |
  * |---|---|---|
- * | INVALID_ARGUMENT | create, join, sendChat, command | 서버 주소, 이름, 예약 이름, 방 ID, 크기, 모르는 수신자, 버퍼에 없는 resend_of, 기록 크기 |
- * | NOT_IN_ROOM | leave, sendChat, command, status, writeReport | 방에 없다(입장 중에도 이것이다) |
- * | ALREADY_IN_ROOM | create, join | 방에 있거나 입장 중이다 |
- * | ICE_CONFIG_REJECTED | create, join | ICE 설정 위반. 접속하지 않았다 |
- * | NATIVE_LOAD_FAILED | create, join | mesh 를 만들지 못했다 |
- * | SERVER_UNREACHABLE | create, join | 기한 안에 시그널링 서버에 접속·등록하지 못했다 |
- * | SIGNALING_ERROR | create, join | 서버가 거절했다. 필수 피어가 모두 빠진 join 도 이것이다(server_code ROOM_NOT_FOUND) |
- * | DIRECT_CONNECT_FAILED | join | 기존 참가자 전원과 연결·동기화하지 못했다. 방에서 나간 상태다 |
- * | PEER_VERSION_MISMATCH | join | 기존 참가자와 P2P 버전이 다르다. 방에서 나간 상태다. 실패한 피어가 모두 버전 불일치일 때만 이 코드다. 다른 실패가 섞이면 DIRECT_CONNECT_FAILED 이고 그 피어는 peers 에 `session` / `version` 으로 실린다(theirs 는 싣지 않는다) |
+ * | INVALID_ARGUMENT | create, join, observe, sendChat, command | 서버 주소, 이름, 예약 이름, 방 ID, 크기, 모르는 수신자, 버퍼에 없는 resend_of, 기록 크기 |
+ * | NOT_IN_ROOM | leave, sendChat, command, status, observed, writeReport | 방에 없다(입장 중에도 이것이다). 관전 중의 command·writeReport·ping 도 이것이다 |
+ * | ALREADY_IN_ROOM | create, join, observe | 방에 있거나 입장 중이다 |
+ * | ICE_CONFIG_REJECTED | create, join, observe | ICE 설정 위반. 접속하지 않았다 |
+ * | NATIVE_LOAD_FAILED | create, join, observe | mesh 를 만들지 못했다 |
+ * | SERVER_UNREACHABLE | create, join, observe | 기한 안에 시그널링 서버에 접속·등록하지 못했다 |
+ * | SIGNALING_ERROR | create, join, observe | 서버가 거절했다. 필수 피어가 모두 빠진 join 도 이것이다(server_code ROOM_NOT_FOUND) |
+ * | DIRECT_CONNECT_FAILED | join, observe | 기존 참가자 전원과 연결·동기화하지 못했다. 방에서 나간 상태다 |
+ * | PEER_VERSION_MISMATCH | join, observe | 기존 참가자와 P2P 버전이 다르다. 방에서 나간 상태다. 실패한 피어가 모두 버전 불일치일 때만 이 코드다. 다른 실패가 섞이면 DIRECT_CONNECT_FAILED 이고 그 피어는 peers 에 `session` / `version` 으로 실린다(theirs 는 싣지 않는다) |
  * | CHAT_RATE_LIMITED | sendChat | 60초에 60건 초과. 아무에게도 보내지 않았다 |
  * | RECORD_FAILED | writeReport | 보고서 파일을 쓰지 못했다 |
- * | CANCELLED | create, join, 종료 중의 모든 호출 | 호출이 취소됐거나 shutdown 이 시작됐다 |
+ * | CANCELLED | create, join, observe, 종료 중의 모든 호출 | 호출이 취소됐거나 shutdown 이 시작됐다 |
  * | RuleErrorCode | command, writeReport(NO_ACTIVE_TEST) | shared-state 의 규칙 거절. 기록 파일에 rule 줄을 남긴다 |
  *
  * 입장이 실패로 끝나면 열린 링크와 서버 등록이 남지 않는다. 입장 도중 수신함에 넣은 사건도 남지 않는다
@@ -498,6 +630,22 @@ export interface RoomSession {
 
   /** 수신자에게 직접 보내고 수신자별 ack 를 기다려(5초) 결과를 돌려준다. */
   sendChat(args: SendChatArgs): Promise<SessionResult<ChatSent>>;
+
+  /**
+   * 점검(ping_room). 자신과 관전자를 뺀 참가자 전원에게 읽음 확인을 요청한 고정 글을 보낸다. ack 를 기다린 뒤,
+   * 듣는 중인 수신자의 읽음 확인을 timeoutMs 까지 기다린다. 보내기는 sendChat 과 같은 규칙(속도 상한, 기록 파일)을 따른다.
+   */
+  ping(args: PingArgs): Promise<SessionResult<PingSent>>;
+
+  /**
+   * 관전자로 방에 들어간다(protocol.md 4.6). 입장 판정과 결과 코드는 join 과 같다. 새 결과 코드는 없다.
+   * 관전 중에는 공유 상태에 기록을 쓰지 않고 기록 파일을 열지 않는다. 채팅은 보낼 수 있다(sendChat. 사람이 관전 콘솔에서
+   * 에이전트들에게 지시한다. 받는 쪽 사건의 data.observer 가 참이다). command·writeReport·ping 은 NOT_IN_ROOM(detail `observing read-only`)이다.
+   */
+  observe(args: ObserveRoomArgs): Promise<SessionResult<RoomObserved>>;
+
+  /** 방에 있으면(관전이든 참가든) 지금 복제본과 링크로 만든 요약. 없으면 NOT_IN_ROOM. */
+  observed(): SessionResult<RoomObserved>;
 
   /** 공유 상태를 바꾸고 열린 링크 전부에 변경으로 보낸다. */
   command<C extends SessionCommand>(command: C): Promise<SessionResult<CommandOutputs[C['type']]>>;

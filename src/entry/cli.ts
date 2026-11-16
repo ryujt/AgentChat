@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // `agent-chat` CLI 의 조립 (architecture.md 3.13). 시각·타이머·로그·환경을 만들어 setup 에 넘기는 일만 한다.
 // 설치 진입점은 installer/*.sh 와 scripts/install.mjs 다. 그쪽이 이 파일을 `setup` 명령으로 실행한다.
+// 첫 인자가 `monitor` 면 설치용 로거를 만들기 전에 관전 조립(entry/monitor)의 main 으로 넘긴다(architecture.md 3.14).
 
 import { realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -8,9 +9,32 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFileLogger } from '../diagnostics/index.js';
 import type { Timers } from '../protocol/index.js';
-import { EXIT_FAILED, chooseNodePath, launchMcpProcess, readInstallerEnv, runCli, transientNodeRoots } from '../setup/index.js';
+import {
+  EXIT_FAILED,
+  chooseNodePath,
+  launchMcpProcess,
+  parseCheckArgs,
+  readInstallerEnv,
+  runCli,
+  runStopHookCheck,
+  transientNodeRoots,
+} from '../setup/index.js';
 
 const LOG_CLOSE_BUDGET_MS = 1_000;
+
+const argv = process.argv.slice(2);
+if (argv[0] === 'monitor') {
+  // 관전은 설치 CLI 와 환경·로그가 다르다. 관전 조립이 스스로 만들고 process.exit 으로 끝낸다.
+  const monitor = await import('./monitor.js');
+  await monitor.main(argv.slice(1));
+}
+
+if (argv[0] === 'stop-hook' && argv[1] === 'check') {
+  // Claude Code 의 Stop hook 으로 턴이 끝날 때마다 실행된다. 로거를 만들지 않고 바로 판정한다. 실패해도 막지 않는다(종료 코드 0).
+  const options = parseCheckArgs(argv.slice(2), readInstallerEnv(process.env, homedir(), process.cwd()).home);
+  runStopHookCheck({ ...options, hostPid: process.ppid, now: Date.now(), out: (text) => console.log(text) });
+  process.exit(0);
+}
 
 const now = (): number => Date.now();
 const timers: Timers = {
@@ -27,7 +51,7 @@ const log = createFileLogger({ dir: join(env.home, 'logs'), service: 'cli', leve
 const node = chooseNodePath(process.env['AGENT_CHAT_INSTALL_NODE'], process.execPath, realpathSync, process.cwd(), transientNodeRoots(process.env, tmpdir()));
 
 const code = await runCli({
-  argv: process.argv.slice(2),
+  argv,
   env,
   rawEnv: process.env,
   appRoot,
@@ -40,6 +64,7 @@ const code = await runCli({
   log,
   out: (line) => console.log(line),
   err: (line) => console.error(line),
+  userHome: homedir(),
   launch: launchMcpProcess,
 }).catch((error: unknown) => {
   console.error(`실패: 예상하지 못한 오류로 멈췄다(${error instanceof Error ? error.name : 'error'})`);

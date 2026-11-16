@@ -11,7 +11,8 @@
   "bin": {
     "agent-chat-mcp": "dist/entry/mcp.js",
     "agent-chat-server": "dist/entry/server.js",
-    "agent-chat": "dist/entry/cli.js"
+    "agent-chat": "dist/entry/cli.js",
+    "agent-chat-monitor": "dist/entry/monitor.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

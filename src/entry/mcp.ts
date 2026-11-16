@@ -16,7 +16,7 @@ import { createFileLogger } from '../diagnostics/index.js';
 import type { Logger } from '../diagnostics/contract.js';
 import { DEFAULT_INBOX_LIMITS, createInbox } from '../inbox/index.js';
 import { DEFAULT_MCP_SERVER_LIMITS, loadConfig, startMcpServer } from '../mcp-server/index.js';
-import type { McpServerLimits } from '../mcp-server/contract.js';
+import type { McpServerLimits, MonitorLauncher } from '../mcp-server/contract.js';
 import { createMesh } from '../mesh/index.js';
 import type { Now, Timers } from '../protocol/index.js';
 import { openTranscript, writeReport } from '../records/index.js';
@@ -58,6 +58,16 @@ function readAppInfo(): AppInfo {
   } catch {
     return { name: APP_NAME, version: UNKNOWN_VERSION };
   }
+}
+
+/**
+ * 사람이 방을 콘솔로 지켜보는 진입점(architecture.md 3.14). get_status 와 create_room 의 monitor_command 가 된다.
+ * Windows 에는 sh 가 없으므로 node 로 조립 파일을 바로 실행한다.
+ */
+function monitorLauncherOf(platform: NodeJS.Platform): MonitorLauncher {
+  return platform === 'win32'
+    ? { kind: 'node', path: join(appRoot, 'dist', 'entry', 'monitor.js') }
+    : { kind: 'sh', path: join(appRoot, 'scripts', 'monitor.sh') };
 }
 
 function errorNameOf(error: unknown): string {
@@ -128,6 +138,9 @@ async function main(): Promise<void> {
     now,
     timers,
     log: logger,
+    monitorLauncher: monitorLauncherOf(process.platform),
+    // 선택형 Stop hook 이 이 세션의 상태 파일을 찾는 데 쓴다(부모 = 호스트 프로세스).
+    listenState: { pid: process.pid, ppid: process.ppid },
   });
 
   const closed = await handle.closed;

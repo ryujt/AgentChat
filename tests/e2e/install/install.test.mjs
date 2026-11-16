@@ -56,6 +56,7 @@ describe('V-L10 (가) 설치', () => {
         '[4] 네이티브 모듈: 통과',
         '[5] 호스트 찾기 (Claude Code): 통과',
         '[5] 호스트 찾기 (Codex): 통과',
+        '[5] 호스트 찾기 (Gemini CLI): 건너뜀',
         '[6] MCP 등록 (Claude Code): 통과',
         '[7] MCP 등록 (Codex): 통과',
         '[7] tool_timeout_sec = 600 (Codex): 통과',
@@ -169,9 +170,10 @@ describe('V-L10 (가) 설치', () => {
       w.clearHostCalls();
       const second = w.installMjs([]);
       assert.equal(second.status, 0, second.output);
-      assert.deepEqual(steps(second.stdout).slice(4, 10), [
+      assert.deepEqual(steps(second.stdout).slice(4, 11), [
         '[5] 호스트 찾기 (Claude Code): 통과',
         '[5] 호스트 찾기 (Codex): 통과',
+        '[5] 호스트 찾기 (Gemini CLI): 건너뜀',
         '[6] MCP 등록 (Claude Code): 건너뜀',
         '[7] MCP 등록 (Codex): 건너뜀',
         '[8] 등록 확인 (Claude Code): 통과',
@@ -194,6 +196,7 @@ describe('V-L10 (가) 설치', () => {
         '[1] Node 버전: 통과',
         '[제거 1] 호스트 찾기 (Claude Code): 통과',
         '[제거 1] 호스트 찾기 (Codex): 통과',
+        '[제거 1] 호스트 찾기 (Gemini CLI): 건너뜀',
         '[제거 2] MCP 등록 제거 (Claude Code): 통과',
         '[제거 2] MCP 등록 제거 (Codex): 통과',
       ]);
@@ -285,6 +288,7 @@ describe('V-L10 (가) 종료 코드 2: 실패는 없지만 등록한 호스트�
         '[4] 네이티브 모듈: 통과',
         '[5] 호스트 찾기 (Claude Code): 건너뜀',
         '[5] 호스트 찾기 (Codex): 건너뜀',
+        '[5] 호스트 찾기 (Gemini CLI): 건너뜀',
       ]);
       assert.deepEqual(w.npmCalls(), ['ci', 'run build']);
       assert.ok(result.stdout.includes(`claude mcp add --scope user agent-chat -e AGENT_CHAT_CLIENT=claude-code`));
@@ -320,27 +324,17 @@ describe('V-L10 (가) 종료 코드 2: 실패는 없지만 등록한 호스트�
 
 describe('V-L10 (가) 종료 코드 1: 실패', () => {
   test(
-    '설치 위치가 아니면 아무 것도 바꾸지 않고 실패한다. --in-place 나 AGENT_CHAT_IN_PLACE=1 이면 경고 뒤 계속한다',
+    '저장소를 받은 자리(설치 위치 밖)에서도 그 자리를 그대로 등록한다. 예전 옵션 --in-place 는 받아들이고 결과가 같다',
     withWorld({ inPlace: true }, (w) => {
-      const homeBefore = w.homeFiles();
-      const refused = w.installMjs([]);
-      assert.equal(refused.status, 1, refused.output);
-      assert.deepEqual(steps(refused.stdout), ['[1] Node 버전: 통과', '[2] 설치 위치: 실패']);
-      assert.match(refused.stdout, /설치 위치가 아니다/);
-      assert.ok(refused.stdout.includes(`git clone https://github.com/ryujt/AgentChat "${path.join(w.agentHome, 'app')}" && sh "${path.join(w.agentHome, 'app', 'installer', 'install.sh')}"`), refused.stdout);
-      assert.deepEqual(w.npmCalls(), []);
-      assert.deepEqual(w.hostCalls(), []);
-      assert.deepEqual(changedPaths(homeBefore, w.homeFiles()), []);
-
-      const flagged = w.installMjs(['--in-place']);
-      assert.equal(flagged.status, 0, flagged.output);
-      assert.match(flagged.stdout, /\[2\] 설치 위치: 통과 — 이 자리의 저장소를 등록한다[\s\S]*경고: MCP 등록은 절대 경로를 쓴다/);
+      const here = w.installMjs([]);
+      assert.equal(here.status, 0, here.output);
+      assert.match(here.stdout, /\[2\] 설치 위치: 통과 — 이 자리의 저장소를 등록한다[\s\S]*참고: MCP 등록은 이 폴더의 절대 경로를 쓴다/);
       assert.deepEqual(w.claudeJson().mcpServers['agent-chat'].args, [path.join(w.root, 'dev checkout', 'dist', 'entry', 'mcp.js')]);
+      assert.ok(!existsSync(path.join(w.agentHome, 'app')), '설치 위치에 사본을 만들었다');
 
-      const byEnv = w.installMjs([], { AGENT_CHAT_IN_PLACE: '1' });
-      assert.equal(byEnv.status, 0, byEnv.output);
-      assert.match(byEnv.stdout, /\[6\] MCP 등록 \(Claude Code\): 건너뜀/);
-      assert.equal(w.installMjs([], { AGENT_CHAT_IN_PLACE: '0' }).status, 1);
+      const again = w.installMjs(['--in-place']);
+      assert.equal(again.status, 0, again.output);
+      assert.match(again.stdout, /\[6\] MCP 등록 \(Claude Code\): 건너뜀/);
     }),
   );
 
@@ -579,7 +573,7 @@ describe('V-L10 (가) agent-chat doctor', () => {
     withWorld({}, (w) => {
       const result = w.cli(['doctor']);
       assert.equal(result.status, 1, result.output);
-      assert.match(result.stdout, /D2 등록: 실패 — 이 설치를 가리키는 등록이 없다\(Claude Code: 등록 없음, Codex: 등록 없음\)/);
+      assert.match(result.stdout, /D2 등록: 실패 — 이 설치를 가리키는 등록이 없다\(Claude Code: 등록 없음, Codex: 등록 없음, Gemini CLI: CLI 없음\)/);
       assert.deepEqual(w.mcpLaunches(), []);
     }),
   );

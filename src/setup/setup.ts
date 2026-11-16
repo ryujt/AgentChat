@@ -17,6 +17,7 @@ import {
 } from './channels.js';
 import { applyToolTimeout, backupCodexConfig, projectConfigPaths, userKeysInTable } from './codex-config.js';
 import { runDoctor, type DoctorLimits } from './doctor.js';
+import { backupGeminiSettings } from './gemini-config.js';
 import { buildGuide } from './guide.js';
 import { createHostCli, type HostCli, type HostCliResult } from './host-cli.js';
 import type { EnvMap, InstallerEnv } from './installer-env.js';
@@ -27,11 +28,10 @@ import {
   addArgs,
   expectedLaunch,
   extraEnvOf,
-  getArgs,
   isManagedEnv,
+  lookupRegistration,
   manualAddCommand,
   matchesLaunch,
-  parseGet,
   pickName,
   pointsAtInstall,
   removeArgs,
@@ -77,7 +77,11 @@ interface FoundHost {
   readonly versionText: string;
 }
 
-const ENV_NAME: Readonly<Record<HostKind, string>> = { claude: 'AGENT_CHAT_CLAUDE_BIN', codex: 'AGENT_CHAT_CODEX_BIN' };
+const ENV_NAME: Readonly<Record<HostKind, string>> = {
+  claude: 'AGENT_CHAT_CLAUDE_BIN',
+  codex: 'AGENT_CHAT_CODEX_BIN',
+  gemini: 'AGENT_CHAT_GEMINI_BIN',
+};
 
 function succeeded(result: HostCliResult): boolean {
   return result.outcome === 'exit' && result.code === 0;
@@ -122,8 +126,8 @@ async function findHosts(deps: SetupDeps, clients: readonly HostKind[], reporter
   return found;
 }
 
-async function lookup(found: FoundHost): Promise<Lookup> {
-  return parseGet(found.host, await found.cli.run(getArgs(found.host)));
+async function lookup(deps: SetupDeps, found: FoundHost): Promise<Lookup> {
+  return lookupRegistration(found.cli, deps.env.geminiSettings);
 }
 
 interface Planned {
@@ -175,7 +179,7 @@ function codexProjectDefinition(deps: SetupDeps): string | null {
 }
 
 async function plan(deps: SetupDeps, found: FoundHost, reporter: Reporter, stepId: string, title: string): Promise<Planned | null> {
-  const current = await lookup(found);
+  const current = await lookup(deps, found);
   if (current.state === 'unreadable') {
     reporter.step(stepId, title, 'fail', { host: found.host, detail: `기존 등록을 읽지 못했다(${current.detail})`, errorCode: 'REGISTRATION_UNREADABLE' });
     return null;
@@ -226,6 +230,57 @@ async function registerClaude(deps: SetupDeps, found: FoundHost, reporter: Repor
     return 'not-registered';
   }
   reporter.step('6', title, 'pass', { host: 'claude', detail: planned.existing === null ? '새로 등록' : '명령이나 환경이 달라 다시 등록' });
+  return 'registered';
+}
+
+/**
+ * 단계 7(Gemini CLI). `gemini mcp add --scope user` 로 사용자 설정(~/.gemini/settings.json)에 등록한다.
+ * Gemini CLI 의 `mcp add` 는 같은 이름의 항목을 통째로 바꾼다. 사용자가 더한 칸(trust, timeout, includeTools 등)이 있으면
+ * 지워지므로 다시 등록하지 않고 사용자에게 맡긴다. 파일을 고치기 전에 백업한다.
+ * 채널이 없으므로 AGENT_CHAT_CHANNEL=off 를 넣는다. tool 호출 기본 한도(10분)가 대기 상한(100초)보다 길어 따로 넣지 않는다.
+ */
+async function registerGemini(deps: SetupDeps, found: FoundHost, reporter: Reporter): Promise<RegisterResult> {
+  const title = 'MCP 등록';
+  const planned = await plan(deps, found, reporter, '7', title);
+  if (planned === null) return 'not-registered';
+  const launch = expectedLaunch('gemini', {
+    nodePath: deps.nodePath,
+    appRoot: deps.appRoot,
+    name: planned.name,
+    waitMaxSec: WAIT_MAX_SEC.gemini,
+    agentHome: registeredHome(deps),
+    extraEnv: planned.extraEnv,
+  });
+  if (planned.existing !== null && matchesLaunch(planned.existing, launch, null) && planned.existing.extraSettings.length === 0) {
+    reporter.step('7', title, 'skip', { host: 'gemini', detail: '이미 등록됨' });
+    return 'registered';
+  }
+  if (planned.existing !== null && planned.existing.extraSettings.length > 0) {
+    if (matchesLaunch(planned.existing, launch, null)) {
+      reporter.step('7', title, 'skip', { host: 'gemini', detail: `이미 등록됨(사용자 설정 ${planned.existing.extraSettings.join(', ')} 은 그대로 둔다)` });
+      return 'registered';
+    }
+    reporter.step('7', title, 'action', {
+      host: 'gemini',
+      detail:
+        `기존 등록에 설치가 정하지 않는 설정(${planned.existing.extraSettings.join(', ')})이 있다. 다시 등록하면 Gemini CLI 가 그 설정을 지우므로 손대지 않았다. ` +
+        `${deps.env.geminiSettings.user} 의 mcpServers["${SERVER_NAME}"] 에서 command 를 ${JSON.stringify(launch.command)}, args 를 ${JSON.stringify(launch.args)} 로 고친 뒤 다시 실행한다`,
+    });
+    return 'not-registered';
+  }
+  const backup = backupGeminiSettings(deps.env.geminiSettings.user, join(deps.env.home, 'backups'), deps.now);
+  if (!backup.ok) {
+    reporter.step('7', title, 'fail', { host: 'gemini', detail: `설정 파일을 백업하지 못해 등록하지 않았다(${backup.reason})`, errorCode: 'GEMINI_BACKUP_FAILED' });
+    return 'not-registered';
+  }
+  // `mcp add` 가 같은 이름의 항목을 바꾼다. 지우고 다시 넣지 않아도 된다.
+  const problem = await replaceRegistration(found, false, launch);
+  if (problem !== null) {
+    reporter.step('7', title, 'fail', { host: 'gemini', detail: problem, errorCode: 'REGISTER_FAILED' });
+    return 'not-registered';
+  }
+  const backupNote = backup.backupPath === null ? '' : `. 바꾸기 전 설정 백업: ${backup.backupPath}`;
+  reporter.step('7', title, 'pass', { host: 'gemini', detail: `${planned.existing === null ? '새로 등록' : '명령이나 환경이 달라 다시 등록'}${backupNote}` });
   return 'registered';
 }
 
@@ -338,7 +393,7 @@ async function registerCodex(deps: SetupDeps, found: FoundHost, reporter: Report
   let reason = applied.ok ? null : applied.reason;
   if (applied.ok) {
     // 고친 파일을 Codex 가 그대로 읽는지 본다. 못 읽으면 고치기 전으로 되돌린다.
-    const after = await lookup(found);
+    const after = await lookup(deps, found);
     if (after.state !== 'present' || !matchesLaunch(after.registration, preferred, CODEX_TOOL_TIMEOUT_SEC)) {
       applied.restore();
       reason = 'Codex did not read the edited config file';
@@ -363,7 +418,7 @@ async function registerCodex(deps: SetupDeps, found: FoundHost, reporter: Report
 
 /** 단계 8. 등록된 명령이 이 설치의 Node 와 MCP 진입점인지 다시 읽어 본다. */
 async function verify(deps: SetupDeps, found: FoundHost, reporter: Reporter): Promise<boolean> {
-  const current = await lookup(found);
+  const current = await lookup(deps, found);
   const registration = current.state === 'present' ? current.registration : null;
   if (registration !== null && registration.command === deps.nodePath && pointsAtInstall(registration, deps.appRoot)) {
     // 등록한 Node 를 보여 준다. 셸이 찾은 경로를 쓰지 않았거나 링크를 그대로 썼으면 그 까닭도 싣는다(검토 2차 BOUNDARY-R2-02).
@@ -380,8 +435,8 @@ async function verify(deps: SetupDeps, found: FoundHost, reporter: Reporter): Pr
 /** 단계 9. */
 async function reportChannels(deps: SetupDeps, found: FoundHost, reporter: Reporter): Promise<ChannelsResult> {
   const verdict =
-    found.host === 'codex'
-      ? judgeChannels({ host: 'codex', version: null, providerFlags: [], auth: { kind: 'unreadable' }, managed: { kind: 'absent' }, check: null })
+    found.host !== 'claude'
+      ? judgeChannels({ host: found.host, version: null, providerFlags: [], auth: { kind: 'unreadable' }, managed: { kind: 'absent' }, check: null })
       : judgeChannels({
           host: 'claude',
           version: parseVersion(found.versionText),
@@ -399,7 +454,7 @@ async function reportChannels(deps: SetupDeps, found: FoundHost, reporter: Repor
 function printManualCommands(deps: SetupDeps, clients: readonly HostKind[], reporter: Reporter): void {
   reporter.line('호스트 CLI 를 찾지 못했다. 호스트를 설치한 뒤 다시 실행하거나, 아래 명령으로 직접 등록한다.');
   for (const host of clients) {
-    const waitMaxSec = host === 'claude' ? WAIT_MAX_SEC.claude : WAIT_MAX_SEC.fallback;
+    const waitMaxSec = host === 'claude' ? WAIT_MAX_SEC.claude : host === 'gemini' ? WAIT_MAX_SEC.gemini : WAIT_MAX_SEC.fallback;
     const launch = expectedLaunch(host, {
       nodePath: deps.nodePath,
       appRoot: deps.appRoot,
@@ -409,7 +464,7 @@ function printManualCommands(deps: SetupDeps, clients: readonly HostKind[], repo
     });
     reporter.line(`  ${manualAddCommand(host, launch)}`);
   }
-  reporter.line('  (CLI 가 PATH 밖에 있으면 AGENT_CHAT_CLAUDE_BIN, AGENT_CHAT_CODEX_BIN 으로 실행 파일을 알려 준다.)');
+  reporter.line('  (CLI 가 PATH 밖에 있으면 AGENT_CHAT_CLAUDE_BIN, AGENT_CHAT_CODEX_BIN, AGENT_CHAT_GEMINI_BIN 으로 실행 파일을 알려 준다.)');
 }
 
 function summarize(reporter: Reporter, code: number): number {
@@ -432,7 +487,12 @@ export async function runSetup(deps: SetupDeps, clients: readonly HostKind[]): P
 
   const registered: FoundHost[] = [];
   for (const host of found) {
-    const result = host.host === 'claude' ? await registerClaude(deps, host, reporter) : await registerCodex(deps, host, reporter);
+    const result =
+      host.host === 'claude'
+        ? await registerClaude(deps, host, reporter)
+        : host.host === 'codex'
+          ? await registerCodex(deps, host, reporter)
+          : await registerGemini(deps, host, reporter);
     if (result === 'registered') registered.push(host);
   }
   const verified: FoundHost[] = [];
@@ -455,6 +515,7 @@ export async function runSetup(deps: SetupDeps, clients: readonly HostKind[]): P
       appRoot: deps.appRoot,
       nodeVersion: deps.nodeVersion,
       hosts: verified.map((host) => host.cli),
+      geminiSettings: deps.env.geminiSettings,
       server: deps.env.server,
       launch: deps.launch,
       now: deps.now,
@@ -481,7 +542,7 @@ export async function runRemove(deps: SetupDeps, clients: readonly HostKind[]): 
   let remaining = 0;
   for (const host of found) {
     const title = 'MCP 등록 제거';
-    const current = await lookup(host);
+    const current = await lookup(deps, host);
     if (current.state === 'absent') {
       reporter.step('제거 2', title, 'pass', { host: host.host, detail: '등록이 없다' });
       continue;
@@ -511,7 +572,7 @@ export async function runRemove(deps: SetupDeps, clients: readonly HostKind[]): 
       continue;
     }
     const removed = await host.cli.run(removeArgs(host.host));
-    const after = succeeded(removed) ? await lookup(host) : null;
+    const after = succeeded(removed) ? await lookup(deps, host) : null;
     if (after !== null && after.state === 'absent') {
       reporter.step('제거 2', title, 'pass', { host: host.host, detail: '등록을 지웠다' });
     } else {
@@ -522,9 +583,9 @@ export async function runRemove(deps: SetupDeps, clients: readonly HostKind[]): 
   }
   reporter.line(
     `기록(${join(deps.env.home, 'rooms')}), 저장소(${deps.appRoot}), 진단 로그(${join(deps.env.home, 'logs')}), ` +
-      `Codex 설정 백업(${join(deps.env.home, 'backups')})은 지우지 않았다. 필요 없으면 직접 지운다.`,
+      `Codex·Gemini CLI 설정 백업(${join(deps.env.home, 'backups')})은 지우지 않았다. 필요 없으면 직접 지운다.`,
   );
-  reporter.line('  Codex 설정 백업에는 다른 MCP 서버의 환경 변수 값(토큰 등)이 들어 있을 수 있다. 그 값을 바꿨거나 필요 없으면 백업도 지운다.');
+  reporter.line('  설정 백업에는 다른 MCP 서버의 환경 변수 값(토큰 등)이 들어 있을 수 있다. 그 값을 바꿨거나 필요 없으면 백업도 지운다.');
   reporter.line('열려 있는 세션은 다시 시작해야 tool 이 사라진다.');
   return summarize(reporter, reporter.count('fail') > 0 || remaining > 0 ? EXIT_FAILED : EXIT_OK);
 }

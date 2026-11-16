@@ -77,6 +77,10 @@ export function buildGuide(input: GuideInput): Guide {
   if (input.registered.includes('codex')) {
     notes.push('Codex 에는 채널이 없다. 에이전트가 wait_for_messages 를 되풀이하는 동안만 자동으로 받는다.');
   }
+  if (input.registered.includes('gemini')) {
+    notes.push('Gemini CLI 에는 채널이 없다. 에이전트가 wait_for_messages 를 되풀이하는 동안만 자동으로 받는다.');
+    notes.push('Gemini CLI 는 신뢰하지 않은 폴더에서 사용자 MCP 서버를 끈다. Agent Chat 을 쓸 폴더를 신뢰(trust)해야 tool 이 보인다.');
+  }
   notes.push(`갱신: git -C "${input.appRoot}" pull --ff-only 뒤 sh "${input.appRoot}/installer/install.sh" 를 다시 실행한다.`);
   notes.push(`제거: sh "${input.appRoot}/installer/install.sh" --uninstall`);
   return { actions, notes };

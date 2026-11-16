@@ -376,6 +376,7 @@ const MODULES = [
   'room-session',
   'mcp-server',
   'setup',
+  'monitor',
   'entry',
 ] as const;
 type ModuleName = (typeof MODULES)[number];
@@ -415,9 +416,11 @@ const DEPENDS: Record<Exclude<ModuleName, 'entry'>, Allowed> = {
   },
   'mcp-server': { ...BASE, 'room-session': ['contract.ts'], inbox: ['contract.ts'] },
   setup: BASE_WITH_LOGGER,
+  // 관전 도구(architecture.md 3.14). mcp-server 와 같은 자리다. 세션과 사건의 계약(타입)만 가져온다.
+  monitor: { ...BASE, 'room-session': ['contract.ts'], inbox: ['contract.ts'] },
 };
 
-/** 조립 파일마다 붙일 수 있는 모듈. 파일 이름의 첫 마디(mcp, server, lambda, cli)로 고른다. */
+/** 조립 파일마다 붙일 수 있는 모듈. 파일 이름의 첫 마디(mcp, server, lambda, cli, monitor)로 고른다. */
 const ENTRY_DEPENDS: Record<string, Allowed> = {
   mcp: {
     ...BASE_WITH_LOGGER,
@@ -427,6 +430,16 @@ const ENTRY_DEPENDS: Record<string, Allowed> = {
     mesh: PUBLIC,
     'shared-state': PUBLIC,
     inbox: PUBLIC,
+    records: PUBLIC,
+  },
+  // 관전 조립. entry/mcp 의 목록에서 mcp-server·inbox 를 빼고 monitor 를 더한 것이다(수신함 자리에 monitor 의 싱크가 들어간다).
+  monitor: {
+    ...BASE_WITH_LOGGER,
+    monitor: PUBLIC,
+    'room-session': PUBLIC,
+    'signaling-client': PUBLIC,
+    mesh: PUBLIC,
+    'shared-state': PUBLIC,
     records: PUBLIC,
   },
   server: { ...BASE_WITH_LOGGER, 'signaling-selfhost': PUBLIC },
@@ -449,6 +462,7 @@ const EXTERNAL: Record<ModuleName, readonly string[]> = {
   'room-session': [],
   'mcp-server': ['@modelcontextprotocol/sdk', 'zod'],
   setup: ['@modelcontextprotocol/sdk'],
+  monitor: [],
   entry: [],
 };
 
@@ -506,8 +520,8 @@ const FS_MODULES: readonly ModuleName[] = ['records', 'diagnostics', 'mcp-server
 
 /** console 과 stdout 에 직접 쓸 수 있는 모듈. MCP 프로세스의 stdout 에는 MCP 메시지만 나가야 한다. */
 const STDOUT_MODULES: readonly ModuleName[] = ['diagnostics', 'setup'];
-/** 조립 파일 가운데 console 과 stdout 을 쓸 수 있는 것(설치 CLI 의 출력, 서버의 시작 안내). */
-const STDOUT_ENTRIES: readonly string[] = ['cli', 'server'];
+/** 조립 파일 가운데 console 과 stdout 을 쓸 수 있는 것(설치 CLI 의 출력, 서버의 시작 안내, 관전 출력). */
+const STDOUT_ENTRIES: readonly string[] = ['cli', 'server', 'monitor'];
 
 /** 호스트 CLI(claude, codex)를 실행하는 유일한 파일. 허용 하위 명령은 옆의 시험이 고정한다. */
 const HOST_CLI_FILE = 'setup/host-cli.ts';
@@ -527,7 +541,7 @@ const ENV_READERS: readonly ModuleName[] = ['setup', 'signaling-aws'];
  * 조립 파일의 환경 변수. mcp 는 process.env 를 통째로 loadConfig 에 넘기기만 한다(whole).
  * server 는 실행 옵션을 인자로만 받는다(none).
  */
-const ENTRY_ENV: Record<string, 'any' | 'whole' | 'none'> = { mcp: 'whole', server: 'none', lambda: 'any', cli: 'any' };
+const ENTRY_ENV: Record<string, 'any' | 'whole' | 'none'> = { mcp: 'whole', server: 'none', lambda: 'any', cli: 'any', monitor: 'whole' };
 
 /** 시그널을 보내는 함수를 다룰 수 있는 모듈. */
 const SIGNAL_SENDERS: readonly ModuleName[] = ['signaling-client', 'mesh', 'room-session'];
@@ -737,7 +751,7 @@ export function analyze(files: ReadonlyMap<string, string>): Violation[] {
 
     const allowed = module === null ? null : allowedFor(file, module);
     if (module === 'entry' && allowed === null) {
-      report('layout', 0, 'entry 에는 mcp, server, lambda, cli 조립 파일만 둔다');
+      report('layout', 0, 'entry 에는 mcp, server, lambda, cli, monitor 조립 파일만 둔다');
     }
     const entryKey = (segments[segments.length - 1] ?? '').split('.')[0] ?? '';
     const stdoutAllowed =
@@ -1321,7 +1335,11 @@ describe('V-U8 검사기 자체 시험: 가짜 위반을 잡는다', () => {
     'setup/index.ts': "import { Client } from '@modelcontextprotocol/sdk/client/index.js';\nimport { runHostCli } from './host-cli.js';\nexport const run = (now: () => number) => [Client, runHostCli, process.env.AGENT_CHAT_HOME, now(), console.log('ok')];\n",
     'entry/mcp.ts': "import { readFileSync } from 'node:fs';\nimport { lib } from '../mesh/index.js';\nimport { make } from '../shared-state/index.js';\nexport const main = [lib, make, readFileSync, process.env, { now: () => Date.now(), setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) }];\n",
     'entry/server.ts': "import { start } from '../signaling-selfhost/index.js';\nexport const main = [start, { now: () => Date.now() }, console.log('listening')];\n",
-    'entry/cli.ts': "import { run } from '../setup/index.js';\nexport const main = [run(() => Date.now()), console.log('done')];\n",
+    'entry/cli.ts': "import { run } from '../setup/index.js';\nexport const main = [run(() => Date.now()), console.log('done')];\nexport const monitor = async (argv: string[]) => (await import('./monitor.js')).main(argv);\n",
+    'monitor/contract.ts': "import type { RoomSession } from '../room-session/contract.js';\nimport type { Inbox } from '../inbox/contract.js';\nimport type { LogPort } from '../diagnostics/log-port.js';\nexport interface MonitorDeps { session: RoomSession; inbox: Inbox; log: LogPort; write: (line: string) => void }\n",
+    'monitor/run.ts': "import { LIMITS } from '../protocol/index.js';\nimport type { MonitorDeps } from './contract.js';\nexport const run = (deps: MonitorDeps, env: Record<string, string | undefined>) => { deps.write(String(LIMITS)); return env['NO_COLOR']; };\n",
+    'entry/monitor.ts': "import { readFileSync } from 'node:fs';\nimport { run } from '../monitor/index.js';\nimport { lib } from '../mesh/index.js';\nexport const main = (argv: string[]) => [run, lib, argv, readFileSync, process.env, process.stdout.write('x'), { now: () => Date.now() }];\n",
+    'monitor/index.ts': "export { run } from './run.js';\n",
     'boundaries.test.ts': "import type { Mesh } from './mesh/contract.js';\nexport type T = Mesh;\n",
   };
 
@@ -1354,6 +1372,56 @@ describe('V-U8 검사기 자체 시험: 가짜 위반을 잡는다', () => {
       name: '아래 모듈이 위 모듈을 import',
       rule: 'import-direction',
       files: { 'inbox/queue.ts': "import type { McpServerDeps } from '../mcp-server/contract.js';\nexport type Y = McpServerDeps;\n" },
+    },
+    {
+      name: '(관전) monitor 가 mcp-server 를 import',
+      rule: 'import-direction',
+      files: { 'monitor/run.ts': "import type { McpServerDeps } from '../mcp-server/contract.js';\nexport type Y = McpServerDeps;\n" },
+    },
+    {
+      name: '(관전) monitor 가 room-session 의 구현(index)을 import',
+      rule: 'import-internal',
+      files: { 'monitor/run.ts': "import { createRoomSession } from '../room-session/index.js';\nexport const y = createRoomSession;\n" },
+    },
+    {
+      name: '(관전) monitor 가 mesh 를 직접 import',
+      rule: 'import-direction',
+      files: { 'monitor/run.ts': "import type { Mesh } from '../mesh/contract.js';\nexport type Y = Mesh;\n" },
+    },
+    {
+      name: '(관전) monitor 가 stdout 에 직접 쓴다',
+      rule: 'stdout',
+      files: { 'monitor/run.ts': "export const run = (line: string) => process.stdout.write(line);\n" },
+    },
+    {
+      name: '(관전) monitor 가 console 을 쓴다',
+      rule: 'stdout',
+      files: { 'monitor/run.ts': "export const run = (line: string) => console.log(line);\n" },
+    },
+    {
+      name: '(관전) monitor 가 환경 변수를 직접 읽는다',
+      rule: 'env',
+      files: { 'monitor/run.ts': "export const run = () => process.env.AGENT_CHAT_SERVER;\n" },
+    },
+    {
+      name: '(관전) monitor 가 전역 시계를 부른다',
+      rule: 'clock',
+      files: { 'monitor/run.ts': "export const run = () => Date.now();\n" },
+    },
+    {
+      name: '(관전) monitor 가 파일에 쓴다',
+      rule: 'builtin',
+      files: { 'monitor/run.ts': "import { writeFileSync } from 'node:fs';\nexport const run = writeFileSync;\n" },
+    },
+    {
+      name: '(관전) entry/monitor 가 환경 변수 값을 직접 읽는다(통째로만 넘긴다)',
+      rule: 'env',
+      files: { 'entry/monitor.ts': "export const main = () => process.env.AGENT_CHAT_SERVER;\n" },
+    },
+    {
+      name: '(관전) entry/monitor 가 mcp-server 를 붙인다',
+      rule: 'import-direction',
+      files: { 'entry/monitor.ts': "import { startMcpServer } from '../mcp-server/index.js';\nexport const main = startMcpServer;\n" },
     },
     {
       name: 'mcp-server 가 shared-state 를 직접 import',

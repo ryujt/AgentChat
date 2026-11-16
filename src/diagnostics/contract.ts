@@ -21,6 +21,11 @@ export interface FileLoggerOptions extends LoggerOptions {
   readonly dir: string;
   /** 버퍼 쓰기와 보존 정리(시작 때 1회, 이후 1시간마다)의 타이머. */
   readonly timers: Timers;
+  /**
+   * warn 이상의 줄을 stderr 에도 쓰는가. 생략하면 참이다.
+   * 관전 도구(svc monitor)는 거짓을 준다. 그 콘솔은 사람이 읽는 출력이라 JSON 로그 줄이 섞이면 안 된다(architecture.md 3.12).
+   */
+  readonly stderrCopy?: boolean;
 }
 
 /** stdout 에 JSON 한 줄씩 쓴다(자체 호스팅의 기본, Lambda). 보존은 수집기가 맡는다. */

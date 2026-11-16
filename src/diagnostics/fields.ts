@@ -73,6 +73,10 @@ const ALLOWED_FIELDS: Record<LogFieldName, true> = {
   rss_mb: true,
   step: true,
   host: true,
+  events: true,
+  events_dropped: true,
+  read: true,
+  not_listening: true,
 };
 
 const KNOWN_MODULES: Record<LogModule, true> = {
@@ -89,6 +93,7 @@ const KNOWN_MODULES: Record<LogModule, true> = {
   'room-session': true,
   'mcp-server': true,
   setup: true,
+  monitor: true,
   entry: true,
 };
 

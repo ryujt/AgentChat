@@ -31,6 +31,13 @@ const ALLOWED: Readonly<Record<HostKind, readonly (readonly string[])[]>> = {
     ['mcp', 'add', 'agent-chat', '--env', 'AGENT_CHAT_CHANNEL=off', '--env', 'AGENT_CHAT_WAIT_MAX_SEC=540', '--', NODE, ENTRY],
     ['mcp', 'remove', 'agent-chat'],
   ],
+  gemini: [
+    ['--version'],
+    ['mcp', 'list'],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'user', '-e', 'AGENT_CHAT_CLIENT=gemini-cli', '-e', 'AGENT_CHAT_CHANNEL=off', 'agent-chat', NODE, ENTRY],
+    ['mcp', 'remove', '--scope', 'user', 'agent-chat'],
+  ],
 };
 
 const REJECTED: Readonly<Record<HostKind, readonly (readonly string[])[]>> = {
@@ -116,9 +123,38 @@ const REJECTED: Readonly<Record<HostKind, readonly (readonly string[])[]>> = {
     ['mcp', 'add', 'agent-chat', '--', NODE, ENTRY, 'extra'],
     ['mcp', 'add', 'agent-chat', '--', '/bin/sh', '-c', 'codex exec x'],
   ],
+  gemini: [
+    [],
+    ['-p', 'join the room'],
+    ['--prompt', 'x'],
+    ['--yolo'],
+    ['--approval-mode', 'yolo'],
+    ['--resume', 'latest'],
+    ['--version', '-p', 'x'],
+    ['extensions', 'install', 'x'],
+    ['mcp'],
+    ['mcp', 'get', 'agent-chat'],
+    ['mcp', 'list', '--json'],
+    ['mcp', 'enable', 'agent-chat'],
+    ['mcp', 'disable', 'agent-chat'],
+    ['mcp', 'remove', 'agent-chat'],
+    ['mcp', 'remove', '--scope', 'project', 'agent-chat'],
+    ['mcp', 'remove', '--scope', 'user', 'other-server'],
+    ['mcp', 'add', 'agent-chat', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'project', 'agent-chat', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'user', '--trust', 'agent-chat', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', NODE, ENTRY, '--trust'],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', '--', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'user', 'other-server', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', 'https://example.com/mcp'],
+    ['mcp', 'add', '--scope', 'user', '-e', 'no-equals', 'agent-chat', NODE, ENTRY],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', 'node', ENTRY],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', NODE, '/home/user/other/server.js'],
+    ['mcp', 'add', '--scope', 'user', 'agent-chat', '/bin/sh', '-c', 'gemini -p x'],
+  ],
 };
 
-const HOSTS: readonly HostKind[] = ['claude', 'codex'];
+const HOSTS: readonly HostKind[] = ['claude', 'codex', 'gemini'];
 
 describe('host-cli: 허용하는 하위 명령', () => {
   for (const host of HOSTS) {
@@ -132,7 +168,12 @@ describe('host-cli: 허용하는 하위 명령', () => {
 
     it(`${host}: 실행하는 첫 두 마디는 --version, mcp get·add·remove·list, auth status 뿐이다`, () => {
       const heads = new Set(ALLOWED[host].map((args) => (args[0] === '--version' ? '--version' : `${args[0]} ${args[1]}`)));
-      const expected = host === 'claude' ? ['--version', 'auth status', 'mcp add', 'mcp get', 'mcp list', 'mcp remove'] : ['--version', 'mcp add', 'mcp get', 'mcp list', 'mcp remove'];
+      const expected =
+        host === 'claude'
+          ? ['--version', 'auth status', 'mcp add', 'mcp get', 'mcp list', 'mcp remove']
+          : host === 'codex'
+            ? ['--version', 'mcp add', 'mcp get', 'mcp list', 'mcp remove']
+            : ['--version', 'mcp add', 'mcp list', 'mcp remove'];
       assert.deepEqual([...heads].sort(), expected);
       // 허용 목록에 없는 첫 두 마디로 시작하는 묶음은 어떤 꼬리를 붙여도 거절된다.
       for (const args of REJECTED[host]) {

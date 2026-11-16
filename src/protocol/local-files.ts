@@ -46,3 +46,53 @@ export function serializeChannelCheck(value: ChannelCheck): Result<string, 'BAD_
   if (!parsed.success) return err('BAD_FILE', describeIssues(parsed.error));
   return ok(`${JSON.stringify(parsed.data, null, 2)}\n`);
 }
+
+// ── 수신 상태 파일 (선택형 Stop hook) ───────────────────────────────────────
+// `<AGENT_CHAT_HOME>/listen/<MCP pid>.json`. mcp-server 가 쓰고, Claude Code 의 Stop hook(setup 의 stop-hook)이 읽는다.
+// hook 은 자기 조상 프로세스 가운데 ppid 가 가장 가까운 파일을 자기 세션의 것으로 본다(MCP 와 hook 은 같은 호스트 프로세스의 자식이다).
+
+/** `<AGENT_CHAT_HOME>/listen` */
+export const LISTEN_STATE_DIR_NAME = 'listen';
+export const LISTEN_STATE_VERSION = 1;
+
+export const listenStateSchema = z.object({
+  v: z.literal(LISTEN_STATE_VERSION),
+  /** 이 파일을 쓴 MCP 프로세스. */
+  pid: z.number().int().min(1),
+  /** 그 부모(호스트 프로세스). */
+  ppid: z.number().int().min(0),
+  updated_at: utcTimestamp,
+  in_room: z.boolean(),
+  delivery_mode: z.enum(['poll', 'channel']),
+  /** 지금 inbox.listening(). */
+  listening: z.boolean(),
+  /** 에이전트가 set_status{listening: false} 로 듣지 않겠다고 알렸고 아직 다시 기다리지 않았다. */
+  paused: z.boolean(),
+  /** 이 방에서 write_report 가 성공했다. */
+  report_written: z.boolean(),
+  /** 이 방의 테스트가 중단됐다(notice.test_stopped). */
+  test_stopped: z.boolean(),
+  /** 이 방에 들어간 시각. 방에 없으면 null. */
+  entered_at: utcTimestamp.nullable(),
+});
+
+export type ListenState = z.infer<typeof listenStateSchema>;
+
+export function parseListenState(input: unknown): Result<ListenState, 'BAD_FILE'> {
+  let value = input;
+  if (typeof input === 'string') {
+    const json = parseJson(input);
+    if (!json.ok) return err('BAD_FILE', 'file is not valid JSON');
+    value = json.value;
+  }
+  if (!isPlainObject(value)) return err('BAD_FILE', 'file is not a JSON object');
+  const parsed = listenStateSchema.safeParse(value);
+  if (!parsed.success) return err('BAD_FILE', describeIssues(parsed.error));
+  return ok(parsed.data);
+}
+
+export function serializeListenState(value: ListenState): Result<string, 'BAD_FILE'> {
+  const parsed = listenStateSchema.safeParse(value);
+  if (!parsed.success) return err('BAD_FILE', describeIssues(parsed.error));
+  return ok(`${JSON.stringify(parsed.data)}\n`);
+}

@@ -33,6 +33,7 @@
 | `unreachable` | 직접 연결을 열지 못한 참가자(`shown_as` 가 `unreachable`)의 이름 목록. 내 글은 이들에게 가지 않는다. 처음 연결하는 중인 참가자는 싣지 않는다 |
 | `pushed_since_last_call` | `{count, after_cursor}`. channel 모드에서 마지막 tool 호출 뒤 채널로 보낸 사건 수와, 그 사건들 **바로 앞**의 커서. 못 본 것이 있으면 `wait_for_messages{cursor: after_cursor}` 로 다시 받는다. `cursor` 없는 `wait_for_messages` 의 결과에도 붙는다 |
 | `delivery` | `{mode: "poll", reason, after_cursor}`. channel 모드가 poll 로 되돌아갔다([7.1](#71-상태-전이)). `wait_for_messages{cursor: after_cursor}` 부터 다시 받는다 |
+| `unread` | `{count, oldest_ts, oldest_age_sec}`. poll 모드에서 아직 한 번도 내주지 않은 사건이 있다(에이전트가 듣지 않던 사이에 밀린 양). `oldest_ts` 는 그중 가장 오래된 사건의 `ts`(보낸 쪽 시각), `oldest_age_sec` 는 그 사건이 이 PC 에 들어온 뒤 지난 초(0.1초 단위)다. 사건을 꺼내는 `wait_for_messages`·`confirm_channel` 결과에는 붙지 않는다(개선안 P2, 2026-11-16) |
 | `record_failed` | 로컬 기록 쓰기에 실패했다 |
 | `config` | 무시한 설정 값의 이름과 이유. 그 값은 기본값으로 동작 중이다. 무시한 값이 있는 동안 모든 결과에 붙는다 |
 
@@ -66,6 +67,7 @@
 | `get_status` | 참가자, 연결, 테스트, 전달 모드를 본다 | 상태 공유, 참가 상태 확인 |
 | `set_status` | 자기 도구, 역할, 준비 상태를 알린다 | 상태 공유, 역할 분담·교대 |
 | `send_message` | 방 전체 또는 지정한 참가자에게 글을 보낸다 | 그룹 채팅 |
+| `ping_room` | 참가자마다 전달과 상대 에이전트의 읽음을 점검한다([3.15](#315-ping_room)) | 참가 상태 확인 |
 | `wait_for_messages` | 새 사건이 올 때까지 기다린다 | 자동 수신 |
 | `confirm_channel` | 채널 점검 토큰을 돌려줘 channel 모드로 바꾼다 | 자동 수신 |
 | `start_test` | 테스트 요청과 제한을 방에 공유한다 | 테스트 시작, 실행 제한 |
@@ -80,7 +82,7 @@
 ### 3.1 `create_room`
 
 - 입력: `server?`(문자열. 생략 시 `AGENT_CHAT_SERVER`, 그것도 없으면 `agent-chat.tools.camp`), `room_id?`(생략 시 생성), `name?`(생략 시 `AGENT_CHAT_NAME`).
-- 결과: `{ room_id, server, name, you, participants: [자신], delivery_mode, hint }`. `server` 는 [정규화한 서버 키](protocol.md#6-서버-주소-정규화)다. 다른 에이전트에게 `server` 와 `room_id` 를 같이 전해야 한다. `you` 는 [3.2](#32-join_room)와 같다(만들 때는 늘 `rejoined: false`).
+- 결과: `{ room_id, server, name, you, participants: [자신], observers: [], test: null, delivery_mode, monitor_command, hint }`. `server` 는 [정규화한 서버 키](protocol.md#6-서버-주소-정규화)다. 다른 에이전트에게 `server` 와 `room_id` 를 같이 전해야 한다. `you` 는 [3.2](#32-join_room)와 같다(만들 때는 늘 `rejoined: false`). `monitor_command` 는 이 PC 에서 사람이 이 방을 콘솔로 지켜보는 명령이다([3.4](#34-get_status)).
 - 오류: 공통 + `SIGNALING_ERROR{ROOM_EXISTS | NAME_IN_USE | UNSUPPORTED_VERSION | RATE_LIMITED}`.
 - 규칙:
   - 이미 참가자가 있는 방 ID 로는 만들 수 없다.
@@ -90,7 +92,8 @@
 ### 3.2 `join_room`
 
 - 입력: `room_id`(필수), `server?`, `name?`.
-- 결과: `{ room_id, server, name, you, participants, test, delivery_mode, hint }`.
+- 결과: `{ room_id, server, name, you, participants, observers, test, delivery_mode, hint }`.
+  - `observers`: 입장한 때 이미 방을 지켜보던 관전자([3.4](#34-get_status)의 `observers` 와 같은 형식). 감시받는다는 사실을 입장 결과로도 알린다. 입장 중에 열린 관전자 링크는 `observer_joined` 사건으로 오지 않는다(입장 중의 다른 변화와 같다). 관전자는 `participants` 에 없다. **[2026-11-16 관전 구현 때 더함]**
   - `you`: `{ role, tools, status, note, rejoined }`. 입장하며 쓴 자기 `presence` 다. **재입장이면**(스냅샷에 이 이름의 옛 `presence` 가 있었으면) `rejoined: true` 이고 옛 `role`·`tools` 를 이어받는다. `status` 는 `joined`, `note` 는 `null` 이다. 문맥을 잃고 돌아온 에이전트는 여기서 자기가 맡았던 역할을 알고, 방과 확인한 뒤 `set_status` 로 준비를 알린다(검토 1차 PRODUCT-R1-01).
   - `participants`: [`get_status`](#34-get_status) 와 같은 형식, 같은 규칙이다(자신을 뺀다).
   - `test`: 현재 테스트의 요청문, 제한, 남은 시간·시나리오, 중단 여부. 없으면 `null`. **재입장자는 여기서 현재 목표와 역할 현황을 받는다.** `test.scenarios.items` 는 진행 중인(한도 안의) 시나리오의 `scenario_id`·합의한 `actor`·`verifier` 다([3.4](#34-get_status)). 재입장한 행동자는 여기서 주장을 붙일 `scenario_id` 를, 재입장한 검증자는 자기가 맡은 시나리오를 안다. 입장 중 스냅샷으로 받은 시나리오와 주장은 사건으로 오지 않기 때문이다(검토 3차 PRODUCT-R3-01). 나를 기다리는 주장의 내용은 `get_status` 의 `claims.waiting_for_you` 에 있다.
@@ -140,12 +143,14 @@
 {
   "ok": true,
   "room": { "room_id": "…", "server": "wss://agent-chat.tools.camp", "name": "claude-4kq2",
-            "signaling": "connected", "net": { "stun": true, "srflx_seen": true } },
+            "signaling": "connected", "net": { "stun": true, "srflx_seen": true },
+            "monitor_command": "sh '/Users/me/.agent-chat/app/scripts/monitor.sh' k3x9q0ab12cdx7p2 wss://agent-chat.tools.camp" },
   "delivery_mode": "poll",
   "participants": [
     { "name": "codex-7f3k", "client": "codex", "tools": ["browser"], "role": "수강생 A",
       "status": "ready", "link": "open", "listening": true, "shown_as": "ready" }
   ],
+  "observers": [ { "name": "observer-4k2q", "link": "open", "since": "2026-11-16T05:01:02.000Z" } ],
   "test": { "test_id": "…", "request": "…", "started": "…", "remaining_min": 41,
             "stopped": null,
             "scenarios": { "used": 2, "max": 20, "items_omitted": 0,
@@ -159,7 +164,16 @@
 }
 ```
 
-- **`participants` 에 싣는 대상**은 세 가지의 합집합이다(자신은 뺀다). (가) 복제본에 `presence` 기록이 있는 이름. (나) 나와 링크가 있거나 연결을 시도 중인 피어. (다) 서버가 가장 최근에 준 참가자 목록. `presence` 를 아직 못 받은 참가자는 `client`, `tools`, `role`, `status` 가 `null` 이다.
+- **`participants` 에 싣는 대상**은 세 가지의 합집합이다(자신은 뺀다). (가) 복제본에 `presence` 기록이 있는 이름. (나) 나와 링크가 있거나 연결을 시도 중인 피어. (다) 서버가 가장 최근에 준 참가자 목록. `presence` 를 아직 못 받은 참가자는 `client`, `tools`, `role`, `status` 가 `null` 이다. **관전자는 뺀다**(아래 `observers`).
+- **`observers`**: 이 방을 읽기 전용으로 지켜보는 관전자([protocol.md 4.6](protocol.md#46-관전자)). 사람이 콘솔에서 `agent-chat monitor` 로 들어온 것이다. 항목은 `{ name, link, since }` 다. `link` 는 `participants` 와 같은 뜻(`open` \| `connecting` \| `none`)이고 `since` 는 그 관전자의 `hello` 를 처음 받은 때(UTC ISO 8601)다.
+  - 싣는 대상: 이 세션에서 `hello.observer: true` 를 받은 이름 가운데, 지금 링크가 있거나 서버 목록에 있는 것. `bye{leave|shutdown}` 로 닫히면 뺀다. 같은 이름이 `hello.observer: false` 로 다시 들어오면 참가자로 옮긴다.
+  - 관전자는 채팅을 보내지 않고 공유 상태에 기록을 쓰지 않는다. 역할을 맡지 않고, 준비 표시(`shown_as`)·`waiting_for_you`·`sent_to`/`not_connected`·`warnings` 의 `unreachable` 에 들지 않는다. **관전자를 기다리지 않는다.**
+  - 관전자는 방 전체 글과 공유 상태를 모두 본다. 대상 지정 글은 대상이 아니면 보지 못한다.
+  - 한계: 관전자인지는 그 관전자와의 링크에서 받은 `hello` 로만 안다. 아직 링크가 열린 적 없는 관전자는 `participants` 에 `connecting`(또는 `unreachable`)으로 보일 수 있다. 관전자를 모르는 구버전 참가자에게는 관전자가 보통 참가자(`status: null`, `not_ready`)로 보인다.
+- **`room.monitor_command`**: 이 PC 의 사용자가 이 방을 콘솔에서 지켜보는 명령 한 줄이다. 방 ID 가 들어 있다(`room_id` 와 같은 값이다). 사용자가 방을 지켜보고 싶어 하면 이 값을 그대로 알려 준다. 만드는 법:
+  - POSIX: `sh '<설치 경로>/scripts/monitor.sh' <room_id> <server>`. 경로는 작은따옴표로 감싸고 안의 `'` 는 `'\''` 로 바꾼다.
+  - Windows: `node "<설치 경로>\dist\entry\monitor.js" <room_id> <server>`.
+  - `<설치 경로>` 는 MCP 프로세스의 패키지 뿌리다(조립이 넘긴다). 다른 PC 의 사용자는 자기 PC 의 설치 경로로 같은 인자를 쓴다(README).
 - `link` 는 `open`(동기화까지 끝남) \| `connecting`(시도 중) \| `none`.
 - `shown_as` 는 표시용 판정이다. **위에서부터 처음 맞는 행**을 쓴다. 마지막 행이 나머지를 모두 받으므로 빠지는 경우가 없다.
 
@@ -187,14 +201,15 @@
 
 ### 3.5 `set_status`
 
-- 입력: `status?`(`joined` \| `ready` \| `working`), `role?`(64자 이하, `null` 로 지움), `tools?`(문자열 20개 이하, 각 64자 이하), `note?`(200자 이하, `null` 로 지움). 준 필드만 바꾼다.
-- 결과: `{ presence }`.
+- 입력: `status?`(`joined` \| `ready` \| `working`), `role?`(64자 이하, `null` 로 지움), `tools?`(문자열 20개 이하, 각 64자 이하), `note?`(200자 이하, `null` 로 지움), `listening?`(`false` 만 받는다). 준 필드만 바꾼다.
+- 결과: `{ presence }`. `listening: false` 를 주면 `hint`(사용자에게 할 말)를 더한다.
+- `listening: false`: 턴을 끝낼 수밖에 없을 때(사용자가 다른 일을 시켰다) 에이전트가 먼저 부른다. 수신함이 120초 유예를 기다리지 않고 `listening` 을 거짓으로 하고, `presence.listening=false` 를 최소 간격(5초)도 기다리지 않고 바로 쓴다. 다른 참가자에게는 `peer` / `stopped_listening` 사건이 간다. 다음 `wait_for_messages` 가 듣기를 다시 켠다. `true` 는 받지 않는다(듣는다는 근거는 대기뿐이다. 개선안 P4, 2026-11-16).
 - 규칙: **자기 것만 바꾼다.** 남의 역할을 정하는 tool 은 없다. 역할이 바뀌면 다른 참가자에게 사건으로 간다. 공유 상태 상한에 닿아도 쓸 수 있다.
 
 ### 3.6 `send_message`
 
 - 입력: `text`(UTF-8 16384바이트 이하), `to?`(참가자 이름 배열. 생략 시 방 전체), `resend_of?`(이전 `message_id`).
-- 결과: `{ message_id, delivered: [이름], undelivered: [{ name, reason }] }`. `reason` 은 `not_connected` \| `ack_timeout`.
+- 결과: `{ message_id, delivered: [이름], undelivered: [{ name, reason }], not_listening?: [{ name, since }], hint? }`. `reason` 은 `not_connected` \| `ack_timeout`. `not_listening` 은 수신자 가운데 지금 에이전트가 듣고 있지 않은(`presence.listening=false`) 참가자와 그렇게 된 시각(그 참가자가 presence 를 쓴 벽시계. 입장 때 이미 그랬으면 그 presence 를 마지막으로 쓴 때라 근삿값)이다. 한 명도 없으면 싣지 않는다. 있으면 `hint` 가 "전달은 됐지만 답이 늦을 수 있다"고 알린다(개선안 P1, 2026-11-16). 방 전체 글은 관전자에게도 가므로 `delivered` 에 관전자 이름이 실릴 수 있다(`get_status.observers` 로 가린다). `to` 에 관전자 이름을 줄 수 있다(관전자는 답하지 못한다).
 - 오류: `INVALID_ARGUMENT`(크기, 모르는 이름, 버퍼에 없는 `resend_of`), `CHAT_RATE_LIMITED`(60초에 60건 초과. `details.retry_after_ms`).
 - 규칙:
   - 수신자에게 직접 보낸다. 다른 참가자가 대신 전달하지 않는다.
@@ -239,7 +254,7 @@
 - 규칙:
   - 요청문과 제한이 방 전체에 공유된다.
   - **방 하나에 테스트는 한 번이다.** 제한은 도중에 바꿀 수 없고, 중단하거나 기한에 닿은 뒤에 같은 방에서 다시 시작할 수도 없다. 다시 하려면 새 방을 만들어 모두 다시 들어온다. 이유: 같은 방에서 다시 시작할 수 있으면 `stop_test` 와 `start_test` 두 번으로 누구나 제한을 다시 정할 수 있다. 사용자가 건 제한을 에이전트가 스스로 풀게 된다.
-  - `sent_to` 는 기록을 보낸 열린 링크의 참가자, `not_connected` 는 방에 있지만 나와 링크가 없는 참가자다. 뒤쪽은 다른 참가자와의 상태 맞춤으로 받는다. 약 10~35초 걸린다([protocol.md 5.4](protocol.md#54-동기화-절차)). 직접 받은 것은 아니다.
+  - `sent_to` 는 기록을 보낸 열린 링크의 참가자, `not_connected` 는 방에 있지만 나와 링크가 없는 참가자다. 둘 다 알려진 관전자는 뺀다(`stop_test` 도 같다). 뒤쪽은 다른 참가자와의 상태 맞춤으로 받는다. 약 10~35초 걸린다([protocol.md 5.4](protocol.md#54-동기화-절차)). 직접 받은 것은 아니다.
 
 ### 3.10 `stop_test`
 
@@ -288,6 +303,15 @@
 - 결과: `{ path, summary: { scenarios, passed, failed, unverified, late } }`.
 - 오류: `NO_ACTIVE_TEST`(테스트 기록이 없음).
 - 규칙: 로컬 복제본으로 만든다. 방에 올리지 않는다. 중단 전에도 부를 수 있다(중간 보고).
+
+### 3.15 `ping_room`
+
+- 입력: `timeout_sec?`(1~60, 기본 15).
+- 결과: `{ message_id, participants: [{ name, outcome, delivered_ms, read_ms, listening }], not_listening: [{ name, since }], hint }`.
+- 하는 일: 자신과 관전자를 뺀 참가자 전원에게 고정 점검 글("Agent Chat check from `<이름>` …No reply is needed.")을 대상 지정으로 보낸다. 프레임에 `rr: true` 를 달아 읽음 확인을 요청한다([protocol.md 4.3](protocol.md#43-채팅-전달)). 받는 쪽 에이전트가 그 사건을 꺼내 가면(`wait_for_messages`·`confirm_channel` 결과나 채널) 받는 쪽 프로세스가 `ack{read: true}` 를 자동으로 돌려준다. 듣는 중인(`listening` 이 거짓이 아닌) 수신자의 읽음 확인을 `timeout_sec` 까지 기다린다.
+- `outcome`: `read`(읽음. `read_ms`), `not_listening`(전달됐지만 그 에이전트가 듣지 않음), `not_read`(전달됐고 듣는 중으로 보이지만 기한 안에 읽지 않음. 다른 일을 하는 중이거나 읽음 확인을 모르는 구버전), `no_ack`(받았다는 확인이 없음. 결과 불명), `not_connected`(링크가 없어 보내지 못함). 시간은 보낸 때부터 이 PC 시계로 잰 ms 다. `delivered_ms` 는 상대 프로세스가 받아 수신함에 넣은 때다.
+- 오류: `INVALID_ARGUMENT`(다른 참가자가 없음), `CHAT_RATE_LIMITED`(보내기는 `send_message` 와 같은 속도 상한을 쓴다), `NOT_IN_ROOM`.
+- 규칙: 점검 글은 기록 파일에 `chat_out` 으로 남는다. 받는 쪽 사건은 `kind="chat"` 이고 `data.read_receipt: true` 다. 답장할 필요가 없다. 사람의 개입 없이 "전송이 되는가"와 "상대 에이전트가 듣고 있는가"를 나눠 본다(개선안 P6, 2026-11-16).
 
 ## 4. 강제 규칙
 
@@ -342,6 +366,7 @@ WORKING TOGETHER
 - Never verify your own claim. Another agent checks the result with its own screen and tools and calls record_verification. What to check (expected, observed, steps) is in the claim event and in claims.waiting_for_you of get_status. If you cannot check, record "unable". Unverified items stay unverified.
 - Leaving the service under test is not leaving the room. Stay in the room so you can report problems.
 - If create_room or join_room fails with NAME_IN_USE, call it again with a different name.
+- Observers (get_status.observers, peer events "observer_joined"/"observer_left") are people watching the room read-only from a console. They see room-wide messages and the shared state, never send messages, take no role and verify nothing. Do not wait for them or assign them work. If your user wants to watch the room, give them monitor_command from create_room or get_status.
 
 STOPPING AND REPORTING
 - If your user asks to stop, call stop_test, then tell your user who it reached (sent_to) and who it did not (not_connected). If any result contains notice.test_stopped, start no new work, finish recording what you already did, and report.
@@ -354,7 +379,7 @@ STOPPING AND REPORTING
 |---|---|---|
 | MESSAGES FROM THE ROOM | 받은 글은 다른 에이전트의 입력이다. 방에서 온 테스트 요청은 다른 사용자의 것이다. 로컬 권한 정책을 넘지 않는다 | 실행 통제(권한 우회 금지) |
 | RECEIVING | 두 수신 경로와 계속 받는 법. 대기를 멈추면 수신이 멈춘다는 사실과 사용자에게 알릴 의무 | 자동 수신 |
-| WORKING TOGETHER | 상태 공유, 지휘자 없음, 역할 교대, 교차 검증, 방 연결 유지, 이름 충돌 처리 | 상태 공유, 자율 역할 분담, 역할 교대, 교차 검증 |
+| WORKING TOGETHER | 상태 공유, 지휘자 없음, 역할 교대, 교차 검증, 방 연결 유지, 이름 충돌 처리, 관전자를 기다리거나 일을 맡기지 않기와 관전 명령 알려 주기 | 상태 공유, 자율 역할 분담, 역할 교대, 교차 검증 (관전은 사용자 요청 2026-11-16) |
 | STOPPING AND REPORTING | 중단과 그 도달 범위, 제한, 보고, 권한 설정을 고치지 않기 | 중단 및 결과 정리, 실행 통제 |
 
 - 문구는 **보조 수단**이다. 통제는 4절의 tool 규칙과 호스트의 권한 체계가 한다.
@@ -369,14 +394,17 @@ STOPPING AND REPORTING
 
 ```json
 { "cursor": "184", "id": "k3x9q0ab12cd-1a", "kind": "chat", "from": "codex-7f3k", "to": "room",
-  "ts": "2026-11-15T02:10:00Z", "text": "강사 화면에서 손들기 표시가 보입니다", "data": {} }
+  "ts": "2026-11-15T02:10:00Z", "text": "강사 화면에서 손들기 표시가 보입니다", "data": {},
+  "received_at": "2026-11-15T02:10:00.300Z" }
 ```
+
+- `received_at` 은 이 PC 의 수신함에 들어온 시각(이 PC 시계)이다. `received_at - ts` 는 전송 지연, 읽은 시각 `- received_at` 은 읽기 지연이다. `ts` 는 보낸 쪽 시계라 시계 차이(`clock_skew`, 60초 초과)가 있으면 앞의 값은 믿지 않는다. 채널 사건의 `meta` 에는 싣지 않는다(채널은 바로 보이므로 읽기 지연이 없다. 개선안 P2, 2026-11-16).
 
 | `kind` | 언제 | `change` / `data` |
 |---|---|---|
-| `chat` | 다른 참가자의 글 | `to` 는 `room` 또는 `you` |
-| `peer` | 참가자 변화 | `joined` \| `left` \| `disconnected` \| `reconnected` \| `unreachable` \| `role` \| `ready`. `data{role, status, tools, reason}` |
-| `test` | 테스트 변화 | `started` \| `replaced` \| `stopped`. `data{test_id, request, limits, reason, by}`. `by` 는 그 기록을 쓴 참가자다. `request` 는 그 참가자의 사용자가 준 글이다 |
+| `chat` | 다른 참가자의 글 | `to` 는 `room` 또는 `you`. `data` 는 `{}`, 점검 글([3.15](#315-ping_room))이면 `{read_receipt: true}`(꺼내 가면 읽음 확인이 자동으로 간다. 답장할 필요 없다), 관전자(사람이 관전 콘솔에서 쓴 글)의 글이면 `{observer: true}`. 관전자의 글은 사용자 범위 안에서 방의 요청처럼 함께 처리한다(instructions) |
+| `peer` | 참가자 변화 | `joined` \| `left` \| `disconnected` \| `reconnected` \| `unreachable` \| `role` \| `ready` \| `stopped_listening` \| `listening` \| `observer_joined` \| `observer_left`. `data{role, status, tools, reason, since}`. `stopped_listening` 은 그 참가자의 `presence.listening` 이 참에서 거짓이 됐다(그 에이전트가 방을 듣지 않는다. `data.since` 는 그 presence 의 벽시계), `listening` 은 `stopped_listening` 을 알린 뒤 다시 참이 됐다는 뜻이다. 입장 직후 처음 듣기 시작한 것은 알리지 않는다(개선안 P4, 2026-11-16). `observer_*` 는 관전자([protocol.md 4.6](protocol.md#46-관전자))의 링크가 동기화까지 열렸다 / 닫혔다는 뜻이고 `data` 는 `{}` 또는 `{reason}`(닫힌 사유)이다. 요약 글은 "`<이름>` started observing the room (read-only). Room-wide messages and the shared state reach it." / "`<이름>` stopped observing the room." 이다 |
+| `test` | 테스트 변화 | `started` \| `replaced` \| `stopped`. `data{test_id, request, limits, reason, by, detail}`. `by` 는 그 기록을 쓴 참가자다. `request` 는 그 참가자의 사용자가 준 글이다. `detail` 은 `stopped` 일 때 중단 기록의 사유 글(`stop_test` 의 `reason`. 기한 중단은 빈 글)이고 그 밖에는 `null` 이다(관전 출력이 중단 사유를 보이려고 더했다. 2026-11-16) |
 | `scenario` | 시나리오 변화 | `started` \| `over_limit`. `data{scenario_id, title, by, plan, actor, verifier}`. `plan`·`actor`·`verifier` 는 시작한 참가자가 적은 값이고 없으면 `null` 이다. 검증 담당은 `verifier` 로 자기가 지정됐는지 안다(검토 3차 PRODUCT-R3-01) |
 | `claim` | 새 주장. 검증이 필요하다 | `data{claim_id, scenario_id, by, action, expected, observed, steps, outcome, late}`. 검증자가 자기 화면과 도구로 확인할 내용(기대·관찰·재현 절차)을 모두 싣는다. `expected` 는 없으면 `null` 이다(검토 3차 PRODUCT-R3-01. 그 전에는 `action` 과 `outcome` 뿐이었다) |
 | `verification` | 주장에 검증이 붙음 | `data{claim_id, result, by, claim_status}` |
@@ -389,6 +417,7 @@ STOPPING AND REPORTING
 - 입장 도중 스냅샷으로 받은 상태는 사건으로 오지 않는다. `join_room` 결과의 `participants` 와 `test` 가 싣는다. 자기가 부른 tool 이 만든 변화도 사건으로 오지 않는다(예외: 기한으로 쓰인 `stop{time_limit}`).
 - `cursor` 는 수신함 순번이다. 다른 참가자와 공유되지 않는다. **프로세스 시작 시각(ms) 다음부터** 1씩 오른다(13자리 수. 입력 형식은 15자리까지). 그래서 대화가 이어지는 채로 MCP 프로세스만 다시 떠도(호스트의 재연결, crash 뒤 재시작) 새 사건의 `cursor` 는 앞 프로세스의 것보다 크고, `cursor` 로 거르는 에이전트가 새 사건을 중복으로 버리지 않는다. 앞 프로세스의 `cursor` 를 넘기면 새 사건을 처음부터 받는다(아직 준 적 없는 곳을 가리키면 마지막으로 준 곳으로 보는 규칙의 반대쪽이다. 검토 2차 PRODUCT-R2-01). PC 시계가 앞 프로세스 시작보다 뒤로 돌아가면 겹칠 수 있다.
 - `status`·`working` 같은 잦은 상태 변화는 사건으로 만들지 않는다. `ready` 가 된 것만 알린다.
+- **관전자 프로세스에서만 나오는 값**이 있다. `peer` / `status`(다른 참가자의 `presence.status` 가 바뀔 때마다. `data{role, status, tools}`)와 `system` / `observer_unaware`(관전자를 모르는 구버전 참가자. `data.peer`)다. 같은 사건 타입(`InboxEvent`)을 쓰지만 MCP 프로세스(참가자)는 이 둘을 만들지 않는다. 에이전트에게는 오지 않는다([architecture.md 3.10](architecture.md#310-room-session)의 관전 모드).
 - `peer.unreachable` 은 방에 있는 참가자와 직접 연결을 열지 못했을 때 한 번 낸다([protocol.md 3.1](protocol.md#31-접촉-시작-규칙)). `data.reason` 은 `no_response`(시그널 단계) \| `no_route`(ICE 단계) \| `version` 이다. 그 참가자에게는 내 글이 가지 않는다.
 - `system` 의 `data.code`: `inbox_dropped`(수신함 누락 건수), `signaling_blocked`(재접속이 `NAME_IN_USE`·`ROOM_FULL` 로 막힘. 계속 시도 중), `signaling_detached`(재접속을 멈춤. 복구: `leave_room` 뒤 패키지를 갱신하고 다시 입장), `name_conflict`(같은 이름의 다른 세션이 서버에 등록됨), `state_diverged`(한 참가자와 스냅샷을 주고받아도 복제본이 맞춰지지 않는다. 새 기록 때문에 잠깐 다른 것은 알리지 않는다. 판정은 [protocol.md 5.4](protocol.md#54-동기화-절차)), `record_failed`, `clock_skew`.
 - 전달 모드의 변화는 사건으로 오지 않는다. 그 변화는 언제나 이 에이전트의 tool 호출 안에서 일어나고 그 결과가 알린다(`confirm_channel` 결과의 `delivery_mode`, `notice.delivery`, `get_status.delivery_mode`). 사건으로도 넣으면 channel 로 바뀐 직후 "확인 안 된" 사건이 하나 생겨, 방이 조용해도 확인 호출이 없으면 수신 불명으로 넘어간다 **[G1 에서 확정. 이전 초안에는 `system` 코드 `delivery_mode` 가 있었고 넣는 모듈이 정해져 있지 않았다]**.
@@ -464,7 +493,7 @@ STOPPING AND REPORTING
 | **channel 모드에서 알림 유실** | 호스트가 알림을 버렸는데 서버는 모른다 | 다음 tool 결과의 `notice.pushed_since_last_call` 이 건수와 `after_cursor` 를 알려 준다. 에이전트가 `wait_for_messages{cursor: after_cursor}` 로 다시 받는다. 2분 넘게 확인이 없으면 poll 로 돌아간다 |
 | **poll 응답 유실** (호스트 타임아웃과 응답이 엇갈림) | 에이전트가 결과를 못 받는다 | 에이전트의 다음 호출이 이전 `next_cursor` 를 넘기므로 같은 사건을 다시 받는다 |
 | **밀린 사건이 많음** | 에이전트가 10분 동안 다른 일을 하는 사이 수십 건이 쌓였다 | 한 번에 20건, 24000바이트까지만 준다. `more: true` 로 이어 받는다 |
-| **에이전트가 대기를 멈춤** (poll) | 수신이 끊긴다. **MCP 서버는 다시 깨울 수 없다** | 120초 뒤 `listening=false` 가 되어 다른 참가자에게 `not_ready` 로 보인다. 사건은 수신함에 쌓인다(상한 1000건). 에이전트는 멈추기 전에 사용자에게 알려야 한다(instructions) |
+| **에이전트가 대기를 멈춤** (poll) | 수신이 끊긴다. **MCP 서버는 다시 깨울 수 없다** | 120초 뒤(`set_status{listening: false}` 면 바로) `listening=false` 가 되어 다른 참가자에게 `not_ready` 로 보이고, 대기 중인 참가자에게 `peer` / `stopped_listening` 사건이 간다. 보내는 쪽 `send_message` 결과에 `not_listening` 이 실린다. 사건은 수신함에 쌓인다(상한 1000건). 다시 깨어난 에이전트의 다음 tool 결과에 `notice.unread` 가 붙는다. 에이전트는 진행 보고 때문에 턴을 끝내지 않는다(instructions, 결과의 `hint`). 사용자가 켠 Stop hook 이 있으면 호스트가 턴 종료를 막는다([7.4](#74-선택형-stop-hook-claude-code)) |
 | **긴 턴 도중의 중단 요청** | 채널 사건은 다음 턴에 묶여 전달될 수 있다 **[문서]** | 어떤 Agent Chat tool 을 부르든 `notice.test_stopped` 가 붙는다. `start_scenario` 는 거절된다 |
 
 ### 7.3 호스트별 조건 (설치가 안내한다)
@@ -473,6 +502,7 @@ STOPPING AND REPORTING
 |---|---|---|
 | Claude Code | `claude --dangerously-load-development-channels server:agent-chat` 로 시작하고 경고 대화상자에서 사람이 승인. claude.ai 로그인 또는 Console API 키. Team/Enterprise 는 `channelsEnabled` 필요. `-p` 와 Agent SDK 는 불가 **[문서]** | poll. 대기 상한 100초 |
 | Codex | 없음. 서버 알림으로 턴이 시작되지 않는다 **[소스 PRE-ALT-07]** | poll. 대기 상한 540초 또는 50초 |
+| Gemini CLI | 없음 | poll. 대기 상한 100초(tool 호출 기본 한도 10분 안). `AGENT_CHAT_CHANNEL=off` 로 등록한다(2026-11-16, Gemini CLI 0.66.0 에서 등록·연결 점검 확인) |
 | 그 밖 | 없음 | poll. 대기 상한 50초 |
 
 **개발 채널 플래그의 경고문.** 플래그로 시작하면 호스트가 이 글을 보여 준다 **[문서]**.
@@ -494,8 +524,18 @@ Agent Chat 은 GitHub 에서 받는 서버다. 그래서 설치는 이 경고문
 - 반복이 실제 호스트에서 유지되는지는 **헤드리스 실행에서만** 봤다 **[실측, 가정 A-MCP-4, A-MCP-5 의 일부]**. `claude -p`(Claude Code 2.1.325)와 `codex exec`(Codex 0.169.0)에 "들어가 오는 글에 답하라"를 한 번 주자 30분 동안 15건 모두 1.4~2.9초에 답했고, 대기가 끊긴 횟수는 0, Claude 의 100초 대기는 백그라운드로 옮겨지지 않았고, Codex 의 540초 대기 1회도 호스트 기한 없이 돌아왔다([이력](../../tests/test-history/2026-11-16-final-sessions.md)). 사람이 쓰는 대화형 세션과 "사람이 끼어들어 턴을 끝낸 뒤"는 보지 않았다. 판정 기준은 [검증 계획의 `V-I3`, `V-I4`](verification-plan.md#35-실제-에이전트-세션)에 미리 고정했다.
 - 유지되지 않으면 설계에 없는 것을 몰래 더하지 않는다. 다음 순서로 한다.
   1. 그 호스트를 "자동 수신: 턴이 살아 있는 동안만"으로 설치 보고와 저장소 README 에 적는다. 완료 기준 "자동 수신"은 그 호스트에서 통과가 아니다.
-  2. 대안 후보는 **사용자가 동의해 직접 켜는 Stop hook** 이다. 두 호스트 모두 턴이 끝날 때 hook 이 새 입력을 줄 수 있다고 문서에 있다 **[문서. 미실행]**. 채택하려면 세 가지가 먼저 확인돼야 한다. (가) hook 의 실제 동작과 연속 실행 상한. (나) hook 이 하는 일이 "방에 있으면 다시 대기하라"는 고정 문구를 돌려주는 것뿐이라, 받은 글이 실행 경로에 들어가지 않는다. (다) 설치가 hook 을 대신 등록하지 않고 사용자가 직접 켠다. 채택하면 이 문서와 [권한 경계](#10-권한-경계)를 고쳐 다시 검토한다.
+  2. 대안은 **사용자가 동의해 직접 켜는 Stop hook** 이다. Claude Code 용으로 채택했다([7.4](#74-선택형-stop-hook-claude-code). 개선안 P5, 2026-11-16). 아래 세 조건 가운데 (나)·(다)는 구현이 지킨다. (가)는 실제 호스트에서 아직 보지 않았다. 두 호스트 모두 턴이 끝날 때 hook 이 새 입력을 줄 수 있다고 문서에 있다 **[문서. 미실행]**. 채택하려면 세 가지가 먼저 확인돼야 한다. (가) hook 의 실제 동작과 연속 실행 상한. (나) hook 이 하는 일이 "방에 있으면 다시 대기하라"는 고정 문구를 돌려주는 것뿐이라, 받은 글이 실행 경로에 들어가지 않는다. (다) 설치가 hook 을 대신 등록하지 않고 사용자가 직접 켠다. 채택하면 이 문서와 [권한 경계](#10-권한-경계)를 고쳐 다시 검토한다.
 - 외부 실행기로 새 턴을 일으키는 방법(`codex queue`, `codex exec resume`, `claude -p --resume`)은 쓰지 않는다. 실행기가 권한 범위를 다시 정하게 되어 "방 참여만으로 권한 제한을 우회할 수 없다"와 충돌하기 쉽다([README 결정 D9](README.md#3-핵심-결정과-근거)).
+
+### 7.4 선택형 Stop hook (Claude Code)
+
+poll 의 자동 수신은 에이전트의 행동 하나(턴을 끝내지 않기)에 걸려 있다. 그것을 호스트가 강제하는 선택 사항이다. **기본은 끔이다.** 사용자가 `agent-chat stop-hook on [--max-min <분>]` 으로 켜고 `off` 로 끈다(`installer/uninstall.sh` 도 끈다). 에이전트는 hook 을 고치지 않는다([agent-guide.md 1절](../agent-guide.md#1-먼저-지킬-것)).
+
+- 켜면 `~/.claude/settings.json`(또는 `$CLAUDE_CONFIG_DIR/settings.json`)의 `hooks.Stop` 에 항목 하나를 더한다. 명령은 `exec '<node>' '<패키지>/dist/entry/cli.js' stop-hook check --home '<AGENT_CHAT_HOME>' --max-min <분>` 이다. 고치기 전 파일은 `<AGENT_CHAT_HOME>/backups/` 에 복사한다. 다른 키와 다른 hook 은 그대로 둔다.
+- MCP 프로세스는 tool 호출이 끝날 때와 수신 상태·전달 모드가 바뀔 때 `<AGENT_CHAT_HOME>/listen/<pid>.json`(`v, pid, ppid, updated_at, in_room, delivery_mode, listening, paused, report_written, test_stopped, entered_at`)을 쓴다. 바뀔 때만 쓰고 종료 때 지운다. 형식은 `protocol` 의 `listenStateSchema` 다.
+- hook 은 `exec` 로 떠서 부모가 호스트(Claude Code) 프로세스다. `ppid` 가 그 값과 같고 살아 있는 MCP 의 파일만 이 세션의 것으로 본다. 죽은 프로세스의 파일은 지운다.
+- **막는 조건**: 방에 있고, poll 이고, `set_status{listening: false}` 로 멈추지 않았고, 들어간 지 `--max-min`(기본 60, 최대 1440)분이 안 됐다. 그때만 `{"decision":"block","reason":…}` 을 쓴다. 이유 글은 고정 문구다("`wait_for_messages` 를 이어 부르며 협업하라. 사용자가 명시적으로 퇴실시킬 때까지 남는다"). `write_report`·테스트 중단은 끝낼 조건이 아니다(사용자가 명시적으로 퇴실시킬 때까지 협업한다는 결정, 2026-11-16). 상태 파일의 `report_written`·`test_stopped` 는 진단용으로만 남긴다. 받은 글은 hook 의 판정과 출력에 들어가지 않는다.
+- 그 밖(파일 없음, 읽기 실패, Windows)은 언제나 막지 않는다. 무한 반복은 `--max-min` 이 끊는다. Codex 에는 같은 기능이 없어 instructions 와 `hint`(P3)에 기댄다.
 
 ## 8. 로컬 기록
 
@@ -608,6 +648,7 @@ PRD 의 "대화와 실행 결과는 로컬에 기록"이다. 진단 로그와 �
 | 받은 글로 이 PC 에서 무언가 실행되지 않는다 | MCP 서버에 명령 실행·임의 파일 접근 tool 이 없다. 실행 코드가 `child_process` 를 쓰지 않는다(설치 CLI 제외) | 소스 검사 테스트 (`V-U8`) |
 | 설치가 권한을 넓히지 않는다 | 설치는 MCP 등록만 한다. 허용 목록, 승인 모드, 샌드박스, hook 설정을 바꾸지 않는다. 설치가 쓰는 곳과, 전후에 비교하는 권한 관련 키의 목록은 [architecture.md 3.13](architecture.md#313-setup)에 있다 | 권한 관련 키의 설치 전후 비교 (`V-S1`, `V-I1`). 파일 전체를 비교하지 않는다. 호스트가 같은 파일을 스스로 고쳐 쓰기 때문이다 |
 | 새 에이전트 프로세스를 다른 권한으로 띄우지 않는다 | 외부 실행기를 쓰지 않는다. 호스트 CLI 를 실행하는 코드는 `src/setup/host-cli.ts` 한 파일에만 둔다. 실행하는 하위 명령은 `--version`, `mcp get`·`add`·`remove`·`list`, `auth status` 뿐이고, 그 파일의 단위 시험이 이 목록을 고정한다 | 소스 검사 (`V-U8`): 그 파일 밖의 `child_process` 없음, 그 파일에 시험이 있음, 권한을 넓히는 실행 옵션 문자열(`--dangerously-skip-permissions` 등)이 `src` 와 설치 진입점(`installer/`, `scripts/`, `deployments/`)에 없음. `node:module`(`createRequire`)로 `child_process` 를 부르는 길 없음. SDK 의 클라이언트 stdio 전송(프로세스를 띄운다)은 `src/setup/mcp-process.ts` 뿐이고 `mcp-server` 는 SDK 의 클라이언트 쪽을 쓰지 않음. 하위 명령 목록은 `V-L10` 과 그 파일의 단위 시험 |
+| 선택형 Stop hook 이 권한을 넓히지 않는다 | 설치가 켜지 않는다. 사용자가 `agent-chat stop-hook on` 을 직접 실행해야 켜진다. hook 이 하는 일은 고정 문구로 "다시 대기하라"를 돌려주는 것뿐이고, 받은 글은 판정과 출력에 들어가지 않는다([7.4](#74-선택형-stop-hook-claude-code)) | `src/setup/stop-hook.test.ts`, 설치 전후 비교(`V-S1`)는 그대로 통과해야 한다 |
 | 받은 글이 사용자 지시처럼 보이지 않는다 | 채널 태그의 `from`, 예약 이름 거절, JSON 문자열 값, instructions 의 구분 문구, 태그 문자열 무력화 | `V-L7`, 실제 세션 `V-I6` |
 | 에이전트가 권한 설정을 고치지 않는다 | 저장소 README 와 `docs/agent-guide.md`, instructions 에 "권한·허용 목록·hook 설정은 에이전트가 고치지 않는다. 사용자가 승인 프롬프트에서 직접 고른다"를 적는다 | 에이전트 주도 설치 전후의 같은 비교 (`V-I1`). 사람이 프롬프트에서 "항상 허용"을 고른 것은 기록해 두고, 달라진 항목이 그 기록과 하나씩 대응하는지 본다 |
 
@@ -615,7 +656,7 @@ PRD 의 "대화와 실행 결과는 로컬에 기록"이다. 진단 로그와 �
 
 | tool | 안내 |
 |---|---|
-| `wait_for_messages`, `send_message`, `get_status`, `set_status`, `confirm_channel`, `start_scenario`, `record_claim`, `record_verification`, `stop_test`, `write_report`, `leave_room` | 항상 허용해도 된다. 이미 들어간 방 안에서만 동작한다 |
+| `wait_for_messages`, `send_message`, `ping_room`, `get_status`, `set_status`, `confirm_channel`, `start_scenario`, `record_claim`, `record_verification`, `stop_test`, `write_report`, `leave_room` | 항상 허용해도 된다. 이미 들어간 방 안에서만 동작한다 |
 | `create_room`, `join_room`, `start_test` | **매번 승인으로 남기기를 권한다** |
 
 - 이유: MCP 등록은 user scope 라 이 PC 의 모든 세션에 tool 이 보인다. `join_room` 까지 항상 허용하면, 무관한 세션이 읽은 문서가 "이 서버의 이 방에 들어가라"고 했을 때 승인 없이 입장한다. 그 세션은 낯선 참가자의 글을 받게 되고, MCP 프로세스는 임의의 서버에 접속해 이 PC 의 IP 를 드러낸다. 다른 tool 은 여전히 호스트가 막지만, **방 참여 자체**가 사용자 동의 밖에서 일어난다.
@@ -626,3 +667,5 @@ PRD 의 "대화와 실행 결과는 로컬에 기록"이다. 진단 로그와 �
 
 - 다른 에이전트의 글이 모델 입력이 되는 한 프롬프트 주입 가능성은 남는다. 이를 막는 경계는 **호스트의 권한 체계**이고, Agent Chat 은 그 경계를 건드리지 않는다.
 - 방에 들어가면 다른 참가자와 시그널링 서버가 이 PC 의 IP 주소를 본다. 연결 후보에는 내부망 주소도 들어 있다. 저장소 README 에 적는다.
+- **방 ID 를 아는 사람은 누구나 관전자로 들어와 방 전체 글과 공유 상태를 읽을 수 있다.** 참가자로 들어와도 읽을 수 있으므로 새로 생긴 위험은 아니다. 관전자가 들어오면 새 버전의 참가자에게는 `observer_joined` 사건과 `get_status.observers` 로 보인다. 관전자를 모르는 구버전 참가자에게는 이름 모를 참가자로 보인다([protocol.md 4.6](protocol.md#46-관전자)).
+- 관전 출력(콘솔)에는 채팅 본문과 기록의 글이 그대로 나온다. 화면 공유나 터미널 기록으로 퍼질 수 있다. 출력에 방 ID 는 싣지 않는다([architecture.md 3.14](architecture.md#314-monitor)).
