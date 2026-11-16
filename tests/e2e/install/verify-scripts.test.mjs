@@ -106,7 +106,7 @@ describe('V-S1·V-S2 실행 스크립트 (대역)', () => {
       const launches = w.mcpLaunches();
       assert.equal(launches.length, 4);
       assert.deepEqual(launches.slice(0, 2).map((launch) => [launch.script, launch.env.AGENT_CHAT_CLIENT, launch.env.AGENT_CHAT_WAIT_MAX_SEC]), [
-        [path.join(w.app, 'dist', 'entry', 'mcp.js'), 'claude-code', '100'],
+        [path.join(w.app, 'dist', 'entry', 'mcp.js'), 'claude-code', '30'],
         [path.join(w.app, 'dist', 'entry', 'mcp.js'), 'codex', '540'],
       ]);
       // server 를 생략했다.

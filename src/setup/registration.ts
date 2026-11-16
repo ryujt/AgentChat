@@ -15,7 +15,7 @@ const NAME_PREFIX: Readonly<Record<HostKind, string>> = { claude: 'claude', code
 const NAME_SUFFIX_LENGTH = 4;
 
 /** `wait_for_messages` 한 번의 최대 대기(architecture.md 5절). */
-export const WAIT_MAX_SEC = { claude: 100, codexWithTimeout: 540, gemini: 100, fallback: 50 } as const;
+export const WAIT_MAX_SEC = { claude: 30, codexWithTimeout: 540, gemini: 30, fallback: 50 } as const;
 /** Codex 설정에 넣는 tool 호출 한도. 대기 상한 540초보다 길어야 한다. */
 export const CODEX_TOOL_TIMEOUT_SEC = 600;
 

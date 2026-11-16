@@ -500,9 +500,9 @@ STOPPING AND REPORTING
 
 | 호스트 | channel 모드 조건 | 안 되면 |
 |---|---|---|
-| Claude Code | `claude --dangerously-load-development-channels server:agent-chat` 로 시작하고 경고 대화상자에서 사람이 승인. claude.ai 로그인 또는 Console API 키. Team/Enterprise 는 `channelsEnabled` 필요. `-p` 와 Agent SDK 는 불가 **[문서]** | poll. 대기 상한 100초 |
+| Claude Code | `claude --dangerously-load-development-channels server:agent-chat` 로 시작하고 경고 대화상자에서 사람이 승인. claude.ai 로그인 또는 Console API 키. Team/Enterprise 는 `channelsEnabled` 필요. `-p` 와 Agent SDK 는 불가 **[문서]** | poll. 대기 상한 30초(사용자 글의 최대 전달 지연. 2026-11-16 에 100초에서 줄였다) |
 | Codex | 없음. 서버 알림으로 턴이 시작되지 않는다 **[소스 PRE-ALT-07]** | poll. 대기 상한 540초 또는 50초 |
-| Gemini CLI | 없음 | poll. 대기 상한 100초(tool 호출 기본 한도 10분 안). `AGENT_CHAT_CHANNEL=off` 로 등록한다(2026-11-16, Gemini CLI 0.66.0 에서 등록·연결 점검 확인) |
+| Gemini CLI | 없음 | poll. 대기 상한 30초(tool 호출 기본 한도 10분 안). `AGENT_CHAT_CHANNEL=off` 로 등록한다(2026-11-16, Gemini CLI 0.66.0 에서 등록·연결 점검 확인) |
 | 그 밖 | 없음 | poll. 대기 상한 50초 |
 
 **개발 채널 플래그의 경고문.** 플래그로 시작하면 호스트가 이 글을 보여 준다 **[문서]**.

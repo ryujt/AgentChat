@@ -101,7 +101,7 @@ describe('V-L10 (가) 설치', () => {
       assert.match(codexName, /^codex-[a-z0-9]{4}$/);
       assert.deepEqual(claudeAdd, [
         'mcp', 'add', '--scope', 'user', 'agent-chat',
-        '-e', 'AGENT_CHAT_CLIENT=claude-code', '-e', `AGENT_CHAT_NAME=${claudeName}`, '-e', 'AGENT_CHAT_WAIT_MAX_SEC=100',
+        '-e', 'AGENT_CHAT_CLIENT=claude-code', '-e', `AGENT_CHAT_NAME=${claudeName}`, '-e', 'AGENT_CHAT_WAIT_MAX_SEC=30',
         '--', w.node, w.mcpEntry,
       ]);
       assert.deepEqual(codexAdd, [
@@ -116,7 +116,7 @@ describe('V-L10 (가) 설치', () => {
       assert.deepEqual(
         w.mcpLaunches().map(({ node, script, args, env }) => ({ node, script, args, env })),
         [
-          { node: w.node, script: w.mcpEntry, args: [], env: { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: claudeName, AGENT_CHAT_WAIT_MAX_SEC: '100' } },
+          { node: w.node, script: w.mcpEntry, args: [], env: { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: claudeName, AGENT_CHAT_WAIT_MAX_SEC: '30' } },
           { node: w.node, script: w.mcpEntry, args: [], env: { AGENT_CHAT_CLIENT: 'codex', AGENT_CHAT_NAME: codexName, AGENT_CHAT_WAIT_MAX_SEC: '540', AGENT_CHAT_CHANNEL: 'off' } },
         ],
       );
@@ -133,7 +133,7 @@ describe('V-L10 (가) 설치', () => {
         type: 'stdio',
         command: w.node,
         args: [w.mcpEntry],
-        env: { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: claudeName, AGENT_CHAT_WAIT_MAX_SEC: '100' },
+        env: { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: claudeName, AGENT_CHAT_WAIT_MAX_SEC: '30' },
       });
       // Codex 의 이 서버 표에는 command, args, env, tool_timeout_sec 뿐이다. 승인 모드 키가 없다.
       const own = w.codexTomlText().slice(INITIAL.codexToml.length).split('\n').filter((line) => / = /.test(line)).map((line) => line.split(' = ')[0]);

@@ -237,7 +237,7 @@ async function registerClaude(deps: SetupDeps, found: FoundHost, reporter: Repor
  * 단계 7(Gemini CLI). `gemini mcp add --scope user` 로 사용자 설정(~/.gemini/settings.json)에 등록한다.
  * Gemini CLI 의 `mcp add` 는 같은 이름의 항목을 통째로 바꾼다. 사용자가 더한 칸(trust, timeout, includeTools 등)이 있으면
  * 지워지므로 다시 등록하지 않고 사용자에게 맡긴다. 파일을 고치기 전에 백업한다.
- * 채널이 없으므로 AGENT_CHAT_CHANNEL=off 를 넣는다. tool 호출 기본 한도(10분)가 대기 상한(100초)보다 길어 따로 넣지 않는다.
+ * 채널이 없으므로 AGENT_CHAT_CHANNEL=off 를 넣는다. tool 호출 기본 한도(10분)가 대기 상한(30초)보다 길어 따로 넣지 않는다.
  */
 async function registerGemini(deps: SetupDeps, found: FoundHost, reporter: Reporter): Promise<RegisterResult> {
   const title = 'MCP 등록';

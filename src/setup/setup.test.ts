@@ -135,7 +135,7 @@ describe('setup: 설치', () => {
     await runSetup(w.deps, BOTH);
     assert.deepEqual(w.adds('claude'), [[
       'mcp', 'add', '--scope', 'user', 'agent-chat',
-      '-e', 'AGENT_CHAT_CLIENT=claude-code', '-e', 'AGENT_CHAT_NAME=claude-aaaa', '-e', 'AGENT_CHAT_WAIT_MAX_SEC=100',
+      '-e', 'AGENT_CHAT_CLIENT=claude-code', '-e', 'AGENT_CHAT_NAME=claude-aaaa', '-e', 'AGENT_CHAT_WAIT_MAX_SEC=30',
       '--', NODE, w.entry,
     ]]);
     assert.deepEqual(w.adds('codex'), [[
@@ -250,7 +250,7 @@ describe('setup: 설치', () => {
     });
     assert.equal(await runSetup(w.deps, ['claude']), 0, w.text());
     assert.match(w.text(), /\[6\] MCP 등록 \(Claude Code\): 통과 — 명령이나 환경이 달라 다시 등록/);
-    assert.deepEqual(w.hosts.claude.scopes.get('user')?.env, { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: 'claude-keep', AGENT_CHAT_WAIT_MAX_SEC: '100' });
+    assert.deepEqual(w.hosts.claude.scopes.get('user')?.env, { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: 'claude-keep', AGENT_CHAT_WAIT_MAX_SEC: '30' });
   });
 
   it('명령이나 환경이 다른 등록은 지우고 다시 등록한다. 이름과 사용자가 더한 변수는 지킨다', async () => {
@@ -266,7 +266,7 @@ describe('setup: 설치', () => {
     assert.deepEqual(w.hosts.claude.scopes.get('user'), {
       command: NODE,
       args: [w.entry],
-      env: { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: 'claude-keep', AGENT_CHAT_WAIT_MAX_SEC: '100', AGENT_CHAT_SERVER: 'ws://127.0.0.1:8787' },
+      env: { AGENT_CHAT_CLIENT: 'claude-code', AGENT_CHAT_NAME: 'claude-keep', AGENT_CHAT_WAIT_MAX_SEC: '30', AGENT_CHAT_SERVER: 'ws://127.0.0.1:8787' },
     });
   });
 
@@ -751,7 +751,7 @@ describe('setup: Gemini CLI', () => {
   const entryOf = (w: World): Record<string, unknown> | undefined =>
     (JSON.parse(readFileSync(settingsPath(w), 'utf8')) as { mcpServers?: Record<string, Record<string, unknown>> }).mcpServers?.['agent-chat'];
 
-  it('사용자 설정에 등록하고(채널 끔, 대기 100초) 확인한다. 다시 실행하면 이미 등록됨이고, 제거하면 지운다', async () => {
+  it('사용자 설정에 등록하고(채널 끔, 대기 30초) 확인한다. 다시 실행하면 이미 등록됨이고, 제거하면 지운다', async () => {
     const w = world('gemini');
     mkdirSync(dirname(settingsPath(w)), { recursive: true });
     writeFileSync(settingsPath(w), JSON.stringify({ theme: 'dark', mcpServers: { other: { command: 'x' } } }));
@@ -759,7 +759,7 @@ describe('setup: Gemini CLI', () => {
     assert.deepEqual(w.adds('gemini').map((call) => call.slice(0, 4)), [['mcp', 'add', '--scope', 'user']]);
     const entry = entryOf(w);
     assert.deepEqual([entry?.['command'], entry?.['args']], [NODE, [w.entry]]);
-    assert.deepEqual(entry?.['env'], { AGENT_CHAT_CLIENT: 'gemini-cli', AGENT_CHAT_NAME: 'gemini-aaaa', AGENT_CHAT_WAIT_MAX_SEC: '100', AGENT_CHAT_CHANNEL: 'off' });
+    assert.deepEqual(entry?.['env'], { AGENT_CHAT_CLIENT: 'gemini-cli', AGENT_CHAT_NAME: 'gemini-aaaa', AGENT_CHAT_WAIT_MAX_SEC: '30', AGENT_CHAT_CHANNEL: 'off' });
     const settings = JSON.parse(readFileSync(settingsPath(w), 'utf8')) as Record<string, unknown>;
     assert.equal(settings['theme'], 'dark', '다른 설정은 그대로다');
     assert.ok(/\[8\] 등록 확인 \(Gemini CLI\): 통과/.test(w.text()), w.text());
