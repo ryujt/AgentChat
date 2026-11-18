@@ -40,6 +40,8 @@ export interface SelfHostServerOptions {
   /** 0 이면 운영체제가 고른다. 실제 포트는 돌려준 address 에 있다. */
   readonly port: number;
   readonly limits: SelfHostLimits;
+  /** 허용할 브라우저 출처 하나. 생략하면 Origin 이 없는 연결만 받는다. */
+  readonly allowedOrigin?: string;
   readonly log: ServerLogPort;
   readonly now: Now;
   readonly timers: Timers;
@@ -113,7 +115,7 @@ function errorCodeOf(error: unknown): string {
 }
 
 export function startSelfHostServer(options: SelfHostServerOptions): Promise<SelfHostServer> {
-  const { limits, log, now, timers } = options;
+  const { limits, log, now, timers, allowedOrigin } = options;
   const rssBytes = options.rssBytes ?? ((): number => process.memoryUsage().rss);
 
   const store = createMemoryRoomStore();
@@ -301,8 +303,10 @@ export function startSelfHostServer(options: SelfHostServerOptions): Promise<Sel
   function onUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
     const ip = clientIp(request);
     if (closing !== null) return refuse(socket, 503, 'shutdown', ip);
-    // 브라우저 클라이언트를 지원하지 않는다(protocol.md 2.1).
-    if (request.headers.origin !== undefined) return refuse(socket, 403, 'origin', ip);
+    const origins = request.headersDistinct.origin;
+    if (origins !== undefined && (origins.length !== 1 || origins[0] !== allowedOrigin)) {
+      return refuse(socket, 403, 'origin', ip);
+    }
     if (conns.size >= limits.maxConnections) return refuse(socket, 503, 'max_connections', ip);
     if ((ipCounts.get(ip) ?? 0) >= limits.maxConnectionsPerIp) return refuse(socket, 429, 'max_connections_per_ip', ip);
 

@@ -38,7 +38,7 @@ describe('서버 진입점', { concurrency: false }, () => {
     const server = start(['--help']);
     const exit = await server.waitForExit({ timeoutMs: 10_000 });
     assert.equal(exit.code, 0);
-    for (const option of ['--host', '--port', '--max-connections', '--max-connections-per-ip', '--join-deadline-ms', '--trust-proxy', '--log-dir']) {
+    for (const option of ['--host', '--port', '--max-connections', '--max-connections-per-ip', '--join-deadline-ms', '--trust-proxy', '--allow-origin', '--log-dir']) {
       assert.ok(server.stdout().includes(option), `안내에 ${option} 이 없다`);
     }
     assert.equal(READY.test(server.stdout()), false);
@@ -56,6 +56,9 @@ describe('서버 진입점', { concurrency: false }, () => {
       ['--max-connections-per-ip', '1.5'],
       ['--join-deadline-ms', '0'],
       ['--host', ''],
+      ['--allow-origin', '*'],
+      ['--allow-origin', 'https://tools.camp/agent-chat'],
+      ['--allow-origin', 'null'],
       ['extra-positional'],
     ];
     for (const args of cases) {
@@ -64,6 +67,19 @@ describe('서버 진입점', { concurrency: false }, () => {
       assert.equal(exit.code, 1, `${args.join(' ')}: 종료 코드 ${exit.code}`);
       assert.match(server.stderr(), /사용법: agent-chat-server/, args.join(' '));
       assert.equal(server.stdout(), '', `${args.join(' ')}: stdout 에 출력이 있다`);
+    }
+  });
+
+  it('--allow-origin 은 지정한 브라우저 출처만 허용한다', async () => {
+    const origin = 'https://tools.camp';
+    const server = start(['--host', '127.0.0.1', '--port', '0', '--allow-origin', origin]);
+    try {
+      const url = await ready(server);
+      const client = await openWire(url, { headers: { Origin: origin } });
+      await client.close();
+      await assert.rejects(openWire(url, { headers: { Origin: `${origin}.example.com` } }), (error) => error.status === 403);
+    } finally {
+      await server.stop();
     }
   });
 

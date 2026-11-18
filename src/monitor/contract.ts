@@ -82,16 +82,20 @@ export interface MonitorSink extends SessionInbox {
   dropped(): number;
 }
 
-export interface MonitorSinkDeps {
-  /** stdout 한 줄 쓰기(줄바꿈은 부르는 쪽이 붙인다). */
-  readonly write: (line: string) => void;
-  readonly style: MonitorStyle;
-  readonly json: boolean;
+export type MonitorSinkDeps = {
   /** 넘쳐 버린 것을 알리는 줄의 시각. */
   readonly now: Now;
   /** 표에 없는 시나리오·주장을 만났을 때 지금 요약을 다시 받는다(runMonitor 가 session.observed 로 준다). */
   readonly refresh?: () => RoomObserved | null;
-}
+} & (
+  | { readonly onEvent: (event: InboxEvent) => void }
+  | {
+      /** stdout 한 줄 쓰기(줄바꿈은 부르는 쪽이 붙인다). */
+      readonly write: (line: string) => void;
+      readonly style: MonitorStyle;
+      readonly json: boolean;
+    }
+);
 
 // ── 실행 ────────────────────────────────────────────────────────────────────
 

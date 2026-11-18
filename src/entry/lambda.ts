@@ -11,4 +11,4 @@ const now: Now = () => Date.now();
 const log = createStdoutLogger({ service: 'lambda', level: readLogLevel(process.env).level, now });
 
 // 초기화에서 던지면(필수 환경 변수가 틀림) 모든 호출이 실패하고 배포 검증이 바로 잡는다.
-export const handler: LambdaHandler = createLambdaHandler({ now, log, env: process.env });
+export const handler: LambdaHandler = createLambdaHandler({ now, log, env: process.env, allowedOrigin: 'https://tools.camp' });

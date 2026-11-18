@@ -24,6 +24,7 @@ const USAGE = `사용법: agent-chat-server [옵션]
   --max-connections-per-ip <수>    주소별 연결 수 (기본 ${DEFAULT_SELF_HOST_LIMITS.maxConnectionsPerIp}). 넘으면 HTTP 429
   --join-deadline-ms <ms>          연결 뒤 이 시간 안에 join 이 없으면 닫는다 (기본 ${DEFAULT_SELF_HOST_LIMITS.joinDeadlineMs})
   --trust-proxy                    X-Forwarded-For 의 주소로 주소별 제한을 건다. 프록시 뒤에서만 켠다
+  --allow-origin <출처>            WebSocket 접속을 허용할 브라우저 출처 하나 (예: https://tools.camp)
   --log-dir <디렉터리>             로그를 그 디렉터리의 시간 단위 파일에 쓰고 7일 지난 파일을 지운다 (기본 stdout)
   --help                           이 안내를 출력한다
 `;
@@ -32,6 +33,7 @@ interface ServerArgs {
   readonly host: string;
   readonly port: number;
   readonly limits: SelfHostLimits;
+  readonly allowedOrigin: string | undefined;
   readonly logDir: string | null;
 }
 
@@ -59,6 +61,7 @@ function readArgs(argv: readonly string[]): ParsedArgs {
         'max-connections-per-ip': { type: 'string' },
         'join-deadline-ms': { type: 'string' },
         'trust-proxy': { type: 'boolean' },
+        'allow-origin': { type: 'string' },
         'log-dir': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
@@ -84,8 +87,14 @@ function readArgs(argv: readonly string[]): ParsedArgs {
   }
   const host = text('host') ?? DEFAULT_HOST;
   const logDir = text('log-dir') ?? null;
+  const allowedOrigin = text('allow-origin');
   if (host === '') return { kind: 'error', message: '--host 의 값이 비었다' };
   if (logDir === '') return { kind: 'error', message: '--log-dir 의 값이 비었다' };
+  if (allowedOrigin !== undefined && (
+    !/^https?:\/\//.test(allowedOrigin) || !URL.canParse(allowedOrigin) || new URL(allowedOrigin).origin !== allowedOrigin
+  )) {
+    return { kind: 'error', message: '--allow-origin 의 값은 경로 없는 HTTP(S) 출처여야 한다' };
+  }
 
   return {
     kind: 'run',
@@ -98,6 +107,7 @@ function readArgs(argv: readonly string[]): ParsedArgs {
         joinDeadlineMs: joinDeadlineMs as number,
         trustProxy: values['trust-proxy'] === true,
       },
+      allowedOrigin,
       logDir,
     },
   };
@@ -123,7 +133,7 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { host, port, limits, logDir } = parsed.args;
+  const { host, port, limits, allowedOrigin, logDir } = parsed.args;
 
   // 전역 시계와 타이머는 조립에서만 부른다.
   const now: Now = () => Date.now();
@@ -157,6 +167,7 @@ async function main(): Promise<void> {
       host,
       port,
       limits,
+      allowedOrigin,
       log: logger,
       now,
       timers,

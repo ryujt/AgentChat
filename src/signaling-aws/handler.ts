@@ -1,6 +1,6 @@
 // API Gateway WebSocket 이벤트를 signaling-core 호출로 바꾼다 (architecture.md 3.4, deployment.md 2.2~2.3).
 // 함수 하나가 세 라우트를 받고 requestContext.eventType 으로 가린다.
-//   CONNECT    Origin 헤더가 있으면 403, 없으면 200. 저장도 전송도 하지 않는다.
+//   CONNECT    Origin 이 없거나 허용된 출처면 200, 그 밖은 403. 저장도 전송도 하지 않는다.
 //   MESSAGE    본문을 core.onMessage 에 넘긴다.
 //   DISCONNECT core.onDisconnect.
 // 호출 사이에 메모리 상태를 믿지 않는다. 남겨 두는 것은 SDK 클라이언트(와 그것을 잡은 core)뿐이다.
@@ -30,6 +30,8 @@ export interface LambdaHandlerDeps {
   readonly log: ServerLogPort;
   /** Lambda 환경 변수. 생략하면 process.env 다. */
   readonly env?: LambdaEnv;
+  /** 허용할 브라우저 출처 하나. 생략하면 Origin 이 없는 연결만 받는다. */
+  readonly allowedOrigin?: string;
   readonly aws?: AwsPorts;
 }
 
@@ -52,7 +54,7 @@ interface Incoming {
   readonly connectionId: string;
   readonly apiId: string;
   readonly stage: string;
-  readonly hasOrigin: boolean;
+  readonly origin: string | null | undefined;
   /**
    * 텍스트 프레임의 본문. 바이너리 프레임과 본문 없는 이벤트는 빈 문자열이다(core 가 BAD_MESSAGE 로 답한다).
    * 바이너리 프레임은 API Gateway 가 1003 으로 닫아 여기 오지 않는다(실측 W2). 혹시 오면 위처럼 막는다.
@@ -64,9 +66,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-/** 헤더 이름은 대소문자를 가리지 않는다. 값이 비어 있어도 헤더가 있으면 있는 것이다. */
-function hasHeader(headers: unknown, name: string): boolean {
-  return isRecord(headers) && Object.keys(headers).some((key) => key.toLowerCase() === name);
+function originValues(headers: unknown): unknown[] {
+  if (!isRecord(headers)) return [];
+  return Object.entries(headers).filter(([key]) => key.toLowerCase() === 'origin').map(([, value]) => value);
+}
+
+/** 게이트웨이는 같은 헤더를 두 형식에 실을 수 있다. 중복되거나 서로 다르면 거절한다. */
+function readOrigin(event: Record<string, unknown>): string | null | undefined {
+  const single = originValues(event['headers']);
+  const multi = originValues(event['multiValueHeaders']);
+  if (single.length === 0 && multi.length === 0) return undefined;
+  if (single.length > 1 || multi.length > 1) return null;
+  if (multi.length === 0) return typeof single[0] === 'string' ? single[0] : null;
+
+  const values = multi[0];
+  if (!Array.isArray(values) || values.length !== 1 || typeof values[0] !== 'string') return null;
+  return single.length === 0 || single[0] === values[0] ? values[0] : null;
 }
 
 function readEvent(event: unknown): Incoming | null {
@@ -81,7 +96,7 @@ function readEvent(event: unknown): Incoming | null {
     connectionId,
     apiId,
     stage,
-    hasOrigin: hasHeader(event['headers'], 'origin') || hasHeader(event['multiValueHeaders'], 'origin'),
+    origin: eventType === 'CONNECT' ? readOrigin(event) : undefined,
     text: event['isBase64Encoded'] === true || typeof body !== 'string' ? '' : body,
   };
 }
@@ -95,7 +110,7 @@ function errorName(error: unknown): string {
  * 돌려준 함수는 Origin 거절(403)을 빼고 항상 200 을 돌려준다. 게이트웨이가 오류 프레임을 클라이언트에 보내지 않게 한다.
  */
 export function createLambdaHandler(deps: LambdaHandlerDeps): LambdaHandler {
-  const { now, log } = deps;
+  const { now, log, allowedOrigin } = deps;
   const env = deps.env ?? process.env;
   const aws = deps.aws ?? realAws;
   const config = readLambdaConfig(env);
@@ -124,7 +139,7 @@ export function createLambdaHandler(deps: LambdaHandlerDeps): LambdaHandler {
 
     if (incoming.eventType === 'CONNECT') {
       // 판단만 한다. 이 단계에서는 그 연결로 보낼 수 없고(410), 거절한 연결에는 종료 통지가 오지 않아 저장한 항목이 남는다.
-      if (incoming.hasOrigin) {
+      if (incoming.origin !== undefined && incoming.origin !== allowedOrigin) {
         log.event('info', 'signaling-aws', 'conn.refused', { conn_ref, reason: 'origin', error_code: String(FORBIDDEN.statusCode) });
         return FORBIDDEN;
       }

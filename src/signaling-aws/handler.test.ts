@@ -26,7 +26,7 @@ interface Setup {
   readonly log: ReturnType<typeof createLogRecorder>;
 }
 
-function setup(env: Record<string, string> = ENV): Setup {
+function setup(env: Record<string, string> = ENV, allowedOrigin?: string): Setup {
   const dynamo = createFakeDynamo();
   const management = createFakeManagement();
   const endpoints: string[] = [];
@@ -48,7 +48,7 @@ function setup(env: Record<string, string> = ENV): Setup {
     },
   };
   const log = createLogRecorder();
-  const handler = createLambdaHandler({ now: () => T0, log, env, aws });
+  const handler = createLambdaHandler({ now: () => T0, log, env, allowedOrigin, aws });
   return { handler, dynamo, management, endpoints, regions, log };
 }
 
@@ -87,7 +87,7 @@ describe('Lambda 핸들러: $connect', () => {
     assert.equal(s.management.posts.length + s.management.gets.length + s.management.deletes.length, 0);
   });
 
-  it('Origin 헤더가 있으면(대소문자 무관, 값이 비어도) 403 이고 저장도 전송도 하지 않는다', async () => {
+  it('출처가 설정되지 않으면 Origin 헤더가 있는 접속은 403 이고 저장도 전송도 하지 않는다', async () => {
     for (const headers of [{ Origin: 'https://example.com' }, { origin: '' }, { ORIGIN: 'null' }]) {
       const s = setup();
       assert.deepEqual(await s.handler(event('CONNECT', { headers })), { statusCode: 403 });
@@ -99,6 +99,31 @@ describe('Lambda 핸들러: $connect', () => {
     }
     const s = setup();
     assert.deepEqual(await s.handler(event('CONNECT', { multiValueHeaders: { Origin: ['https://example.com'] } })), { statusCode: 403 });
+  });
+
+  it('허용한 브라우저 출처와 Origin 이 없는 접속만 받는다', async () => {
+    const origin = 'https://tools.camp';
+    const s = setup(ENV, origin);
+    for (const headers of [
+      {},
+      { headers: { orIGin: origin } },
+      { multiValueHeaders: { origin: [origin] } },
+      { headers: { Origin: origin }, multiValueHeaders: { origin: [origin] } },
+    ]) {
+      assert.deepEqual(await s.handler(event('CONNECT', headers)), { statusCode: 200 });
+    }
+    for (const headers of [
+      { headers: { Origin: `${origin}.example.com` } },
+      { headers: { Origin: 'http://tools.camp' } },
+      { headers: { Origin: origin, origin } },
+      { headers: { Origin: origin }, multiValueHeaders: { origin: ['null'] } },
+      { multiValueHeaders: { Origin: [origin, origin] } },
+      { multiValueHeaders: { Origin: [] } },
+    ]) {
+      assert.deepEqual(await s.handler(event('CONNECT', headers)), { statusCode: 403 });
+    }
+    assert.equal(s.dynamo.calls.length, 0);
+    assert.equal(s.management.posts.length, 0);
   });
 });
 

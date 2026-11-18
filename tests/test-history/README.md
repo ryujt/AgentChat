@@ -4,6 +4,7 @@
 
 | 기록 | 대상 | 최근 상태 | 미종결 |
 |---|---|---|---|
+| [2026-11-18-browser-origin](2026-11-18-browser-origin.md) | 브라우저 WebSocket 출처 설정과 거절 조건 | 회귀 시험 42/42, 단위·계약 시험 1697/1697 및 Lambda 빌드 통과 | 공용 서버의 브라우저 접속은 배포 검증에서 확인 |
 | [2026-11-15-pre-implementation-assumptions](2026-11-15-pre-implementation-assumptions.md) | 구현 전 외부 가정(WebRTC 라이브러리, MCP SDK, Claude Code Channels, 타 에이전트 자동 수신) | 탐색 코드로 실측 완료 | 서로 다른 PC·실제 NAT, 실제 에이전트 세션의 자동 수신은 미실행 **후속(마감)**: 실제 세션의 자동 수신은 헤드리스 변형만 실행해 통과([final-sessions](2026-11-16-final-sessions.md)). 서로 다른 PC·실제 NAT, 대화형 세션은 여전히 미실행 |
 | [2026-11-15-aws-apigw-websocket-probe](2026-11-15-aws-apigw-websocket-probe.md) | 공용 서버용 AWS 구성(API Gateway WebSocket + Lambda + DynamoDB)의 동작 | 일회용 탐색 스택으로 실측 완료. 스택 삭제함 | 최대 2시간, 사용자 지정 도메인, 서버가 닫을 때의 종료 코드, `GetConnection`, 스로틀 범위, 단가는 미실측. 설계가 고른 정원 판정 방식도 미실측 **후속**: 단가(A-AWS-12)와 `$default` 예외 프레임 말고는 제품 배포에서 실측했다(사용자 지정 도메인·종료 코드·`GetConnection` [W2](2026-11-15-w2.md), 스로틀 범위 [W9 공용](2026-11-15-w9-public.md), 2시간 한도 [final-long](2026-11-16-final-long.md)) |
 | [2026-11-15-design-review](2026-11-15-design-review.md) | 설계 문서(`docs/design/`)의 검토와 문서 대조 | 독립 검토 1차의 지적 46건, 2차의 지적 5건, 3차의 지적 1건을 반영. 작성자 대조 통과(정적 검사) | 3차 수정분의 독립 재검토 **후속**: 구현 뒤 코드와 문서를 함께 본 독립 검토 1~3차([r1](2026-11-16-review-r1.md)~[r3](2026-11-16-review-r3.md))를 거쳤다. 마감의 문서 대조는 작성자 대조([final-close](2026-11-16-final-close.md)) |

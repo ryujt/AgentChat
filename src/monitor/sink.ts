@@ -62,6 +62,10 @@ export function createMonitorSink(deps: MonitorSinkDeps): MonitorSink {
   const emit = (event: InboxEvent): void => {
     if (closed) return;
     written += 1;
+    if ('onEvent' in deps) {
+      deps.onEvent(event);
+      return;
+    }
     if (deps.json) {
       deps.write(eventLine(event));
       return;

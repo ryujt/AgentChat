@@ -1156,6 +1156,7 @@ describe('V-U8 의존성과 SDK', () => {
       '@aws-sdk/client-apigatewaymanagementapi',
       '@aws-sdk/client-dynamodb',
       '@aws-sdk/lib-dynamodb',
+      '@noble/hashes', // 브라우저 번들의 동기식 프로토콜 지문 계산
       '@types/node',
       '@types/ws',
       'esbuild',

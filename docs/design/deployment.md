@@ -55,7 +55,7 @@ flowchart LR
 
 | 라우트 | 통합 | 하는 일 |
 |---|---|---|
-| `$connect` | Lambda | `Origin` 헤더가 있으면 403. 없으면 200. **저장도 전송도 하지 않는다** |
+| `$connect` | Lambda | `Origin` 헤더가 없거나 `https://tools.camp` 면 200. 다른 값이나 잘못된 헤더는 403. **저장도 전송도 하지 않는다** |
 | `$default` | Lambda | 본문을 `core.onMessage(connectionId, body)` 에 넘긴다 |
 | `$disconnect` | Lambda | `core.onDisconnect(connectionId)` |
 
@@ -291,7 +291,7 @@ Lambda 실행 역할:
 | 11 | 정원(순차) | 정원 + 1 번째 `join` → `ROOM_FULL` |
 | 12 | 정원과 생성(동시) | 정원에서 하나 모자란 방에 4개 연결이 동시에 `join` 한다. 10회 반복해 **통과한 수가 매번 1 이하**다. 같은 방 ID 로 4개 연결이 동시에 `create` 한다. 10회 반복해 **성공이 매번 1 이하**다. 둘 다 0 인 횟수를 기록한다 |
 | 13 | 없는 방 반복 | 한 연결이 없는 방에 5번 `join` → 5번째에 `RATE_LIMITED` 뒤 닫힌다 |
-| 14 | `Origin` 거절 | `Origin` 헤더를 붙인 핸드셰이크가 실패한다 |
+| 14 | `Origin` 거절 | 허용하지 않은 `Origin` 헤더를 붙인 핸드셰이크가 실패한다 |
 | 15 | 여분 프레임과 정리 | 검증 내내 `type` 없는 프레임과 빈 프레임이 0건이다. 검증이 만든 등록을 모두 `leave` 로 지운다 |
 
 오래 걸리는 확인(유휴, 2시간 한도, 로그 내용, 스로틀)은 [검증 계획](verification-plan.md#33-실제-환경-공용-서버)의 `V-P3`~`V-P7` 에서 따로 한다.
@@ -320,6 +320,7 @@ node dist/entry/server.js --host 0.0.0.0 --port 8787
 | `--max-connections-per-ip` | `20` | 주소별 연결 수. 넘으면 업그레이드를 HTTP 429 로 거절한다 **[제안]**. 한 PC 에서 연결을 이보다 많이 띄우는 시험은 이 값을 올린다 |
 | `--join-deadline-ms` | `10000` | 연결 뒤 이 시간 안에 `join` 이 없으면 닫는다 |
 | `--trust-proxy` | 꺼짐 | 켜면 `X-Forwarded-For` 의 **마지막 값**(바로 앞 프록시가 붙인 주소)으로 주소별 제한을 건다. 앞쪽 값은 클라이언트가 꾸밀 수 있어 쓰지 않는다. 프록시 뒤에서만 켠다 |
+| `--allow-origin <출처>` | 없음 | WebSocket 에 접속할 수 있는 브라우저 출처 하나를 지정한다. 예: `https://tools.camp` |
 | `--log-dir` | 없음(stdout) | 주면 그 디렉터리에 시간 단위 파일로 쓰고 7일 지난 파일을 지운다 |
 
 에이전트는 `server` 인자에 이 컴퓨터의 주소를 준다. 예: `203.0.113.5` → `ws://203.0.113.5:8787`.
