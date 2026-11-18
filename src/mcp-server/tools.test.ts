@@ -13,7 +13,7 @@ import { chatEvent, numberedChat, testStoppedEvent } from '../inbox/testing.js';
 import { CHANNEL_CHECK_FILE_NAME, parseChannelCheck } from '../protocol/index.js';
 import type { DirectConnectFailedDetails, SessionFailure } from '../room-session/contract.js';
 import { INSTRUCTIONS } from './instructions.js';
-import { DIRECT_CONNECT_HINTS, KEEP_LISTENING, TOOL_ERROR_MESSAGES } from './messages.js';
+import { DIRECT_CONNECT_HINTS, KEEP_LISTENING, PRIVATE_MESSAGE_HINT, SEND_TO_ROOM, TOOL_ERROR_MESSAGES } from './messages.js';
 import { createMcpApp } from './server.js';
 import { monitorCommand } from './monitor-command.js';
 import { SAMPLE_ROOM_ID, SAMPLE_SERVER, connectHarness, createTestBed, fail, flush, sampleStatus } from './testing.js';
@@ -1055,6 +1055,43 @@ describe('수신 공백 알리기 (개선안 P1·P2·P3·P6)', () => {
     const reply = await h.call('send_message', { text: 'hi' });
     assert.deepEqual(reply.json?.['not_listening'], [{ name: 'codex-7f3k', since: '2026-11-16T01:44:00.000Z' }]);
     assert.ok(String(reply.json?.['hint']).includes('codex-7f3k is not listening now'));
+  });
+
+  it('기본은 방 전체 글이다: instructions·설명·입장 hint 가 그렇게 적고, to 로 보낸 결과에는 hint 를 붙인다', async () => {
+    // 관전 콘솔은 대상 지정 글을 보지 못한다. 한 참가자에게 말할 때도 방 전체로 보내고 글 앞에 @이름을 쓴다(2026-11-18).
+    assert.ok(INSTRUCTIONS.includes('Send every message to the whole room: omit `to` in send_message.'));
+    assert.ok(INSTRUCTIONS.includes('start the text with @name'));
+    // 호스트가 긴 instructions 의 뒤를 자른다(Claude Code 4096자). 이 규칙은 잘리지 않는 앞쪽에 있어야 한다.
+    assert.ok(INSTRUCTIONS.indexOf('Use `to` only when your user asks for a private message.') < 2048);
+
+    const h = await inRoom();
+    const tools = await h.client.listTools();
+    const send = tools.tools.find((tool) => tool.name === 'send_message');
+    assert.ok(send?.description?.includes('By default omit `to`'));
+    assert.ok(JSON.stringify(send?.inputSchema).includes('starting the text with @name'));
+
+    const toRoom = await h.call('send_message', { text: '@codex-7f3k hi' });
+    assert.equal(toRoom.json?.['hint'], undefined);
+    assert.deepEqual(h.session.calls.at(-1), { method: 'sendChat', args: { text: '@codex-7f3k hi' } });
+
+    const priv = await h.call('send_message', { text: 'hi', to: ['codex-7f3k'] });
+    assert.equal(priv.json?.['hint'], PRIVATE_MESSAGE_HINT);
+
+    // 듣지 않는 수신자 안내와 같이 실린다.
+    h.session.responses.sendChat = {
+      ok: true,
+      message_id: 'k3x9q0ab12cd-9',
+      delivered: ['codex-7f3k'],
+      undelivered: [],
+      not_listening: [{ name: 'codex-7f3k', since: '2026-11-16T01:44:00.000Z' }],
+    };
+    const both = String((await h.call('send_message', { text: 'hi', to: ['codex-7f3k'] })).json?.['hint']);
+    assert.ok(both.startsWith(PRIVATE_MESSAGE_HINT));
+    assert.ok(both.includes('codex-7f3k is not listening now'));
+
+    // 입장 결과의 hint 도 방 전체로 쓰라고 한다.
+    const entered = await (await harness()).call('join_room', { room_id: 'k3x9q0ab12cd' });
+    assert.ok(String(entered.json?.['hint']).includes(SEND_TO_ROOM));
   });
 
   it('set_status{listening: false} 는 수신함을 멈추고 넘긴 뒤 사용자에게 할 말을 hint 로 준다', async () => {

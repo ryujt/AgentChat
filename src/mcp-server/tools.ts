@@ -24,6 +24,7 @@ import { monitorCommand } from './monitor-command.js';
 import {
   CONFIRM_REJECTED_MESSAGE,
   PAUSED_HINT,
+  PRIVATE_MESSAGE_HINT,
   TOOL_ERROR_MESSAGES,
   WAIT_HINTS,
   createdTellUser,
@@ -151,7 +152,9 @@ const SHAPES = {
       .array(z.string().max(ID_MAX_CHARS))
       .max(LIMITS.ROOM_MAX_PEERS)
       .optional()
-      .describe('Participant names to send to. Omit to send to the whole room.'),
+      .describe(
+        'Normally omit: the message then goes to the whole room, and you address one participant by starting the text with @name. Pass names here only for a private message your user asked for: only they receive it, and the other participants and the people watching the room cannot see it.',
+      ),
     resend_of: z
       .string()
       .max(ID_MAX_CHARS)
@@ -241,7 +244,7 @@ const DESCRIPTIONS: { readonly [N in ToolName]: string } = Object.freeze({
   set_status:
     'Tell the room your own tools, role and state. Only the fields you pass change. You cannot set anything for another participant. listening=false tells the room right away that you stop listening (use it only when you must end your turn without waiting).',
   send_message:
-    'Send a chat message to the whole room, or only to the named participants. It goes directly to each recipient. "delivered" means the recipient process stored it, not that its agent has read it; not_listening lists recipients whose agent is not waiting for room messages now, so a reply may be late. For a recipient with ack_timeout the outcome is unknown: call again with resend_of.',
+    'Send a chat message. By default omit `to`: it goes to the whole room, where every participant and the people watching the room can read it. To address one participant, still omit `to` and start the text with @name. Pass `to` only when your user asked for a private message: it reaches only the named participants and nobody else can see it. It goes directly to each recipient. "delivered" means the recipient process stored it, not that its agent has read it; not_listening lists recipients whose agent is not waiting for room messages now, so a reply may be late. For a recipient with ack_timeout the outcome is unknown: call again with resend_of.',
   ping_room:
     'Check, without help from anyone, whether messages reach each participant and whether its agent is listening. Sends a fixed check message that needs no reply; reading it sends a read receipt automatically. Returns per participant delivered_ms (its process stored it), read_ms (its agent read it) and outcome (read, not_listening, not_read, no_ack, not_connected). Use it when your user asks whether the chat works or why replies are slow.',
   wait_for_messages:
@@ -485,8 +488,14 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): RegisteredTools {
   mcp.registerTool('send_message', { ...meta('send_message'), inputSchema: SHAPES.send_message }, (args) =>
     handle('send_message', undefined, async () => {
       const result = fromSession(await session.sendChat(withoutUndefined({ ...args })));
-      if (!result.ok || result.value.not_listening === undefined || result.value.not_listening.length === 0) return result;
-      return success({ ...result.value, hint: notListeningHint(result.value.not_listening.map((entry) => entry.name)) });
+      if (!result.ok) return result;
+      const hints: string[] = [];
+      // 대상 지정 글은 관전 콘솔과 다른 참가자에게 보이지 않는다. 다음부터 방 전체로 쓰라고 바로 알린다(2026-11-18).
+      if (args.to !== undefined && args.resend_of === undefined) hints.push(PRIVATE_MESSAGE_HINT);
+      if (result.value.not_listening !== undefined && result.value.not_listening.length > 0) {
+        hints.push(notListeningHint(result.value.not_listening.map((entry) => entry.name)));
+      }
+      return hints.length === 0 ? result : success({ ...result.value, hint: hints.join(' ') });
     }),
   );
 

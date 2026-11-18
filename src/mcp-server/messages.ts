@@ -140,6 +140,7 @@ export function enterHint(input: EnterHintInput): string {
       );
     }
   }
+  parts.push(SEND_TO_ROOM);
   if (input.deliveryMode === 'channel') {
     parts.push(
       'Receiving: delivery_mode is channel. Room events arrive as channel blocks. After handling them, call wait_for_messages once with the cursor of the last block you saw.',
@@ -162,6 +163,17 @@ export const WAIT_HINTS = Object.freeze({
     'Channel mode: do not wait here. Room events arrive as channel blocks. After handling them, call wait_for_messages once with the cursor of the last block you saw.',
   more: 'More events are waiting. Call wait_for_messages again right away with next_cursor.',
 });
+
+/**
+ * 글을 어디로 보낼지(2026-11-18). 기본은 방 전체다. 한 참가자에게 말할 때도 방 전체로 보내고 글 앞에 @이름을 쓴다.
+ * 대상 지정 글(`to`)은 관전 콘솔에 보이지 않아, 지켜보는 사람이 매번 "방 전체로 말하라"고 지시해야 했다.
+ */
+export const SEND_TO_ROOM =
+  'Sending: send every message to the whole room (omit `to`). To address one participant, still send to the whole room and start the text with @name. A message sent with `to` is hidden from the other participants and from the people watching the room; use `to` only when your user asks for a private message.';
+
+/** send_message 를 `to` 로 보낸 결과에 붙인다. 에이전트는 instructions 보다 바로 앞의 tool 결과를 더 잘 따른다. */
+export const PRIVATE_MESSAGE_HINT =
+  'This was a private message: only the participants named in `to` got it, and the other participants and the people watching the room cannot see it. Unless your user asked for a private message, send to the whole room from now on (omit `to`) and start the text with @name to address one participant.';
 
 /** send_message 의 수신자 가운데 듣지 않는 참가자가 있을 때(개선안 P1). */
 export function notListeningHint(names: readonly string[]): string {
